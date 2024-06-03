@@ -3,6 +3,7 @@ use async_compression::futures::bufread::GzipDecoder;
 use async_trait::async_trait;
 use futures::{io::BufReader, StreamExt};
 use gpui::AsyncAppContext;
+use http::github::{latest_github_release, GitHubLspBinaryVersion};
 pub use language::*;
 use lazy_static::lazy_static;
 use lsp::LanguageServerBinary;
@@ -18,11 +19,7 @@ use std::{
     sync::Arc,
 };
 use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
-use util::{
-    fs::remove_matching,
-    github::{latest_github_release, GitHubLspBinaryVersion},
-    maybe, ResultExt,
-};
+use util::{fs::remove_matching, maybe, ResultExt};
 
 pub struct RustLspAdapter;
 
@@ -331,25 +328,26 @@ const RUST_PACKAGE_TASK_VARIABLE: VariableName =
 impl ContextProvider for RustContextProvider {
     fn build_context(
         &self,
-        location: Location,
+        _: &TaskVariables,
+        location: &Location,
         cx: &mut gpui::AppContext,
     ) -> Result<TaskVariables> {
-        let mut context = SymbolContextProvider.build_context(location.clone(), cx)?;
-
         let local_abs_path = location
             .buffer
             .read(cx)
             .file()
             .and_then(|file| Some(file.as_local()?.abs_path(cx)));
-        if let Some(package_name) = local_abs_path
-            .as_deref()
-            .and_then(|local_abs_path| local_abs_path.parent())
-            .and_then(human_readable_package_name)
-        {
-            context.insert(RUST_PACKAGE_TASK_VARIABLE.clone(), package_name);
-        }
-
-        Ok(context)
+        Ok(
+            if let Some(package_name) = local_abs_path
+                .as_deref()
+                .and_then(|local_abs_path| local_abs_path.parent())
+                .and_then(human_readable_package_name)
+            {
+                TaskVariables::from_iter(Some((RUST_PACKAGE_TASK_VARIABLE.clone(), package_name)))
+            } else {
+                TaskVariables::default()
+            },
+        )
     }
 
     fn associated_tasks(&self) -> Option<TaskTemplates> {
@@ -388,6 +386,23 @@ impl ContextProvider for RustContextProvider {
                     "--".into(),
                     "--nocapture".into(),
                 ],
+                tags: vec!["rust-test".to_owned()],
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
+                label: format!(
+                    "cargo test -p {} {}",
+                    RUST_PACKAGE_TASK_VARIABLE.template_value(),
+                    VariableName::Stem.template_value(),
+                ),
+                command: "cargo".into(),
+                args: vec![
+                    "test".into(),
+                    "-p".into(),
+                    RUST_PACKAGE_TASK_VARIABLE.template_value(),
+                    VariableName::Stem.template_value(),
+                ],
+                tags: vec!["rust-mod-test".to_owned()],
                 ..TaskTemplate::default()
             },
             TaskTemplate {
@@ -420,13 +435,6 @@ impl ContextProvider for RustContextProvider {
 }
 
 fn human_readable_package_name(package_directory: &Path) -> Option<String> {
-    fn split_off_suffix(input: &str, suffix_start: char) -> &str {
-        match input.rsplit_once(suffix_start) {
-            Some((without_suffix, _)) => without_suffix,
-            None => input,
-        }
-    }
-
     let pkgid = String::from_utf8(
         std::process::Command::new("cargo")
             .current_dir(package_directory)
@@ -436,19 +444,40 @@ fn human_readable_package_name(package_directory: &Path) -> Option<String> {
             .stdout,
     )
     .ok()?;
-    // For providing local `cargo check -p $pkgid` task, we do not need most of the information we have returned.
-    // Output example in the root of Zed project:
-    // ```bash
-    // ❯ cargo pkgid zed
-    // path+file:///absolute/path/to/project/zed/crates/zed#0.131.0
-    // ```
-    // Extrarct the package name from the output according to the spec:
-    // https://doc.rust-lang.org/cargo/reference/pkgid-spec.html#specification-grammar
-    let mut package_name = pkgid.trim();
-    package_name = split_off_suffix(package_name, '#');
-    package_name = split_off_suffix(package_name, '?');
-    let (_, package_name) = package_name.rsplit_once('/')?;
-    Some(package_name.to_string())
+    Some(package_name_from_pkgid(&pkgid)?.to_owned())
+}
+
+// For providing local `cargo check -p $pkgid` task, we do not need most of the information we have returned.
+// Output example in the root of Zed project:
+// ```bash
+// ❯ cargo pkgid zed
+// path+file:///absolute/path/to/project/zed/crates/zed#0.131.0
+// ```
+// Another variant, if a project has a custom package name or hyphen in the name:
+// ```
+// path+file:///absolute/path/to/project/custom-package#my-custom-package@0.1.0
+// ```
+//
+// Extracts the package name from the output according to the spec:
+// https://doc.rust-lang.org/cargo/reference/pkgid-spec.html#specification-grammar
+fn package_name_from_pkgid(pkgid: &str) -> Option<&str> {
+    fn split_off_suffix(input: &str, suffix_start: char) -> &str {
+        match input.rsplit_once(suffix_start) {
+            Some((without_suffix, _)) => without_suffix,
+            None => input,
+        }
+    }
+
+    let (version_prefix, version_suffix) = pkgid.trim().rsplit_once('#')?;
+    let package_name = match version_suffix.rsplit_once('@') {
+        Some((custom_package_name, _version)) => custom_package_name,
+        None => {
+            let host_and_path = split_off_suffix(version_prefix, '?');
+            let (_, package_name) = host_and_path.rsplit_once('/')?;
+            package_name
+        }
+    };
+    Some(package_name)
 }
 
 async fn get_cached_server_binary(container_dir: PathBuf) -> Option<LanguageServerBinary> {
@@ -748,5 +777,21 @@ mod tests {
 
             buffer
         });
+    }
+
+    #[test]
+    fn test_package_name_from_pkgid() {
+        for (input, expected) in [
+            (
+                "path+file:///absolute/path/to/project/zed/crates/zed#0.131.0",
+                "zed",
+            ),
+            (
+                "path+file:///absolute/path/to/project/custom-package#my-custom-package@0.1.0",
+                "my-custom-package",
+            ),
+        ] {
+            assert_eq!(package_name_from_pkgid(input), Some(expected));
+        }
     }
 }

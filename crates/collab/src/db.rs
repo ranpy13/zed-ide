@@ -415,7 +415,7 @@ impl Database {
         if is_serialization_error(error) && prev_attempt_count < SLEEPS.len() {
             let base_delay = SLEEPS[prev_attempt_count];
             let randomized_delay = base_delay * self.rng.lock().await.gen_range(0.5..=2.0);
-            log::info!(
+            log::warn!(
                 "retrying transaction after serialization error. delay: {} ms.",
                 randomized_delay
             );
@@ -509,8 +509,7 @@ pub type NotificationBatch = Vec<(UserId, proto::Notification)>;
 
 pub struct CreatedChannelMessage {
     pub message_id: MessageId,
-    pub participant_connection_ids: Vec<ConnectionId>,
-    pub channel_members: Vec<UserId>,
+    pub participant_connection_ids: HashSet<ConnectionId>,
     pub notifications: NotificationBatch,
 }
 
@@ -655,8 +654,7 @@ pub struct ChannelsForUser {
     pub channel_memberships: Vec<channel_member::Model>,
     pub channel_participants: HashMap<ChannelId, Vec<UserId>>,
     pub hosted_projects: Vec<proto::HostedProject>,
-    pub dev_servers: Vec<dev_server::Model>,
-    pub remote_projects: Vec<proto::RemoteProject>,
+    pub invited_channels: Vec<Channel>,
 
     pub observed_buffer_versions: Vec<proto::ChannelBufferVersion>,
     pub observed_channel_messages: Vec<proto::ChannelMessageId>,
@@ -764,6 +762,7 @@ pub struct Project {
     pub collaborators: Vec<ProjectCollaborator>,
     pub worktrees: BTreeMap<u64, Worktree>,
     pub language_servers: Vec<proto::LanguageServer>,
+    pub dev_server_project_id: Option<DevServerProjectId>,
 }
 
 pub struct ProjectCollaborator {
@@ -786,8 +785,7 @@ impl ProjectCollaborator {
 #[derive(Debug)]
 pub struct LeftProject {
     pub id: ProjectId,
-    pub host_user_id: Option<UserId>,
-    pub host_connection_id: Option<ConnectionId>,
+    pub should_unshare: bool,
     pub connection_ids: Vec<ConnectionId>,
 }
 

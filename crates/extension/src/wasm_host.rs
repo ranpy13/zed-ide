@@ -13,14 +13,15 @@ use futures::{
     Future, FutureExt, StreamExt as _,
 };
 use gpui::{AppContext, AsyncAppContext, BackgroundExecutor, Task};
+use http::HttpClient;
 use language::LanguageRegistry;
 use node_runtime::NodeRuntime;
+use release_channel::ReleaseChannel;
 use semantic_version::SemanticVersion;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
-use util::http::HttpClient;
 use wasmtime::{
     component::{Component, ResourceTable},
     Engine, Store,
@@ -30,6 +31,7 @@ use wit::Extension;
 
 pub(crate) struct WasmHost {
     engine: Engine,
+    release_channel: ReleaseChannel,
     http_client: Arc<dyn HttpClient>,
     node_runtime: Arc<dyn NodeRuntime>,
     pub(crate) language_registry: Arc<LanguageRegistry>,
@@ -96,6 +98,7 @@ impl WasmHost {
             http_client,
             node_runtime,
             language_registry,
+            release_channel: ReleaseChannel::global(cx),
             _main_thread_message_task: task,
             main_thread_message_tx: tx,
         })
@@ -106,9 +109,9 @@ impl WasmHost {
         wasm_bytes: Vec<u8>,
         manifest: Arc<ExtensionManifest>,
         executor: BackgroundExecutor,
-    ) -> impl 'static + Future<Output = Result<WasmExtension>> {
+    ) -> Task<Result<WasmExtension>> {
         let this = self.clone();
-        async move {
+        executor.clone().spawn(async move {
             let zed_api_version = parse_wasm_extension_version(&manifest.id, &wasm_bytes)?;
 
             let component = Component::from_binary(&this.engine, &wasm_bytes)
@@ -124,8 +127,13 @@ impl WasmHost {
                 },
             );
 
-            let (mut extension, instance) =
-                Extension::instantiate_async(&mut store, zed_api_version, &component).await?;
+            let (mut extension, instance) = Extension::instantiate_async(
+                &mut store,
+                this.release_channel,
+                zed_api_version,
+                &component,
+            )
+            .await?;
 
             extension
                 .call_init_extension(&mut store)
@@ -147,7 +155,7 @@ impl WasmHost {
                 tx,
                 zed_api_version,
             })
-        }
+        })
     }
 
     async fn build_wasi_ctx(&self, manifest: &Arc<ExtensionManifest>) -> Result<wasi::WasiCtx> {

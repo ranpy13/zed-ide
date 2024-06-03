@@ -24,6 +24,10 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
         // First, fetch any embeddings that are cached based on the requested texts' digests
         // Then compute any embeddings that are missing.
         async move {
+            if !self.client.status().borrow().is_connected() {
+                return Err(anyhow!("sign in required"));
+            }
+
             let cached_embeddings = self.client.request(proto::GetCachedEmbeddings {
                 model: self.model.clone(),
                 digests: texts
@@ -72,10 +76,11 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
             texts
                 .iter()
                 .map(|to_embed| {
-                    let dimensions = embeddings.remove(&to_embed.digest).with_context(|| {
-                        format!("server did not return an embedding for {:?}", to_embed)
-                    })?;
-                    Ok(Embedding::new(dimensions))
+                    let embedding =
+                        embeddings.get(&to_embed.digest).cloned().with_context(|| {
+                            format!("server did not return an embedding for {:?}", to_embed)
+                        })?;
+                    Ok(Embedding::new(embedding))
                 })
                 .collect()
         }

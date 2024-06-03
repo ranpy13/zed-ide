@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use util::{truncate_and_remove_front, ResultExt};
 
 use crate::{
-    ResolvedTask, SpawnInTerminal, TaskContext, TaskId, VariableName, ZED_VARIABLE_NAME_PREFIX,
+    ResolvedTask, SpawnInTerminal, TaskContext, TaskId, TerminalWorkDir, VariableName,
+    ZED_VARIABLE_NAME_PREFIX,
 };
 
 /// A template definition of a Zed task to run.
@@ -44,6 +45,10 @@ pub struct TaskTemplate {
     /// * `never` — avoid changing current terminal pane focus, but still add/reuse the task's tab there
     #[serde(default)]
     pub reveal: RevealStrategy,
+
+    /// Represents the tags which this template attaches to. Adding this removes this task from other UI.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// What to do with the terminal pane and tab, after the command was started.
@@ -108,18 +113,30 @@ impl TaskTemplate {
                     &variable_names,
                     &mut substituted_variables,
                 )?;
-                Some(substitured_cwd)
+                Some(TerminalWorkDir::Local(PathBuf::from(substitured_cwd)))
             }
             None => None,
         }
-        .map(PathBuf::from)
-        .or(cx.cwd.clone());
-        let shortened_label = substitute_all_template_variables_in_str(
+        .or(cx
+            .cwd
+            .as_ref()
+            .map(|cwd| TerminalWorkDir::Local(cwd.clone())));
+        let human_readable_label = substitute_all_template_variables_in_str(
             &self.label,
             &truncated_variables,
             &variable_names,
             &mut substituted_variables,
-        )?;
+        )?
+        .lines()
+        .fold(String::new(), |mut string, line| {
+            if string.is_empty() {
+                string.push_str(line);
+            } else {
+                string.push_str("\\n");
+                string.push_str(line);
+            }
+            string
+        });
         let full_label = substitute_all_template_variables_in_str(
             &self.label,
             &task_variables,
@@ -132,7 +149,7 @@ impl TaskTemplate {
             &variable_names,
             &mut substituted_variables,
         )?;
-        let args = substitute_all_template_variables_in_vec(
+        let args_with_substitutions = substitute_all_template_variables_in_vec(
             &self.args,
             &task_variables,
             &variable_names,
@@ -162,9 +179,17 @@ impl TaskTemplate {
                 id,
                 cwd,
                 full_label,
-                label: shortened_label,
+                label: human_readable_label,
+                command_label: args_with_substitutions.iter().fold(
+                    command.clone(),
+                    |mut command_label, arg| {
+                        command_label.push(' ');
+                        command_label.push_str(arg);
+                        command_label
+                    },
+                ),
                 command,
-                args,
+                args: self.args.clone(),
                 env,
                 use_new_terminal: self.use_new_terminal,
                 allow_concurrent_runs: self.allow_concurrent_runs,
@@ -357,7 +382,10 @@ mod tests {
             task_variables: TaskVariables::default(),
         };
         assert_eq!(
-            resolved_task(&task_without_cwd, &cx).cwd.as_deref(),
+            resolved_task(&task_without_cwd, &cx)
+                .cwd
+                .as_ref()
+                .and_then(|cwd| cwd.local_path()),
             Some(context_cwd.as_path()),
             "TaskContext's cwd should be taken on resolve if task's cwd is None"
         );
@@ -372,7 +400,10 @@ mod tests {
             task_variables: TaskVariables::default(),
         };
         assert_eq!(
-            resolved_task(&task_with_cwd, &cx).cwd.as_deref(),
+            resolved_task(&task_with_cwd, &cx)
+                .cwd
+                .as_ref()
+                .and_then(|cwd| cwd.local_path()),
             Some(task_cwd.as_path()),
             "TaskTemplate's cwd should be taken on resolve if TaskContext's cwd is None"
         );
@@ -382,7 +413,10 @@ mod tests {
             task_variables: TaskVariables::default(),
         };
         assert_eq!(
-            resolved_task(&task_with_cwd, &cx).cwd.as_deref(),
+            resolved_task(&task_with_cwd, &cx)
+                .cwd
+                .as_ref()
+                .and_then(|cwd| cwd.local_path()),
             Some(task_cwd.as_path()),
             "TaskTemplate's cwd should be taken on resolve if TaskContext's cwd is not None"
         );
@@ -435,14 +469,14 @@ mod tests {
                 (
                     "env_key_2".to_string(),
                     format!(
-                        "env_var_2_{}_{}",
+                        "env_var_2 {} {}",
                         custom_variable_1.template_value(),
                         custom_variable_2.template_value()
                     ),
                 ),
                 (
                     "env_key_3".to_string(),
-                    format!("env_var_3_{}", VariableName::Symbol.template_value()),
+                    format!("env_var_3 {}", VariableName::Symbol.template_value()),
                 ),
             ]),
             ..TaskTemplate::default()
@@ -500,11 +534,16 @@ mod tests {
             assert_eq!(
                 spawn_in_terminal.args,
                 &[
-                    "arg1 test_selected_text",
-                    "arg2 5678",
-                    &format!("arg3 {long_value}")
+                    "arg1 $ZED_SELECTED_TEXT",
+                    "arg2 $ZED_COLUMN",
+                    "arg3 $ZED_SYMBOL",
                 ],
-                "Args should be substituted with variables and those should not be shortened"
+                "Args should not be substituted with variables"
+            );
+            assert_eq!(
+                spawn_in_terminal.command_label,
+                format!("{} arg1 test_selected_text arg2 5678 arg3 {long_value}", spawn_in_terminal.command),
+                "Command label args should be substituted with variables and those should not be shortened"
             );
 
             assert_eq!(
@@ -520,11 +559,11 @@ mod tests {
             );
             assert_eq!(
                 spawn_in_terminal.env.get("env_key_2").map(|s| s.as_str()),
-                Some("env_var_2_test_custom_variable_1_test_custom_variable_2")
+                Some("env_var_2 test_custom_variable_1 test_custom_variable_2")
             );
             assert_eq!(
                 spawn_in_terminal.env.get("env_key_3"),
-                Some(&format!("env_var_3_{long_value}")),
+                Some(&format!("env_var_3 {long_value}")),
                 "Env vars should be substituted with variables and those should not be shortened"
             );
         }
@@ -639,5 +678,28 @@ mod tests {
         resolved_variables.sort_by_key(|var| var.to_string());
         expected.sort_by_key(|var| var.to_string());
         assert_eq!(resolved_variables, expected)
+    }
+
+    #[test]
+    fn substitute_funky_labels() {
+        let faulty_go_test = TaskTemplate {
+            label: format!(
+                "go test {}/{}",
+                VariableName::Symbol.template_value(),
+                VariableName::Symbol.template_value(),
+            ),
+            command: "go".into(),
+            args: vec![format!(
+                "^{}$/^{}$",
+                VariableName::Symbol.template_value(),
+                VariableName::Symbol.template_value()
+            )],
+            ..TaskTemplate::default()
+        };
+        let mut context = TaskContext::default();
+        context
+            .task_variables
+            .insert(VariableName::Symbol, "my-symbol".to_string());
+        assert!(faulty_go_test.resolve_task("base", &context).is_some());
     }
 }

@@ -42,13 +42,9 @@ const MIN_INPUT_WIDTH_REMS: f32 = 10.;
 const MAX_INPUT_WIDTH_REMS: f32 = 30.;
 const MAX_BUFFER_SEARCH_HISTORY_SIZE: usize = 50;
 
-const fn true_value() -> bool {
-    true
-}
-
 #[derive(PartialEq, Clone, Deserialize)]
 pub struct Deploy {
-    #[serde(default = "true_value")]
+    #[serde(default = "util::serde::default_true")]
     pub focus: bool,
     #[serde(default)]
     pub replace_enabled: bool,
@@ -114,7 +110,7 @@ impl BufferSearchBar {
                 color
             },
             font_family: settings.buffer_font.family.clone(),
-            font_features: settings.buffer_font.features,
+            font_features: settings.buffer_font.features.clone(),
             font_size: rems(0.875).into(),
             font_weight: FontWeight::NORMAL,
             font_style: FontStyle::Normal,
@@ -188,7 +184,7 @@ impl Render for BufferSearchBar {
         let should_show_replace_input = self.replace_enabled && supported_options.replacement;
         let in_replace = self.replacement_editor.focus_handle(cx).is_focused(cx);
 
-        let mut key_context = KeyContext::default();
+        let mut key_context = KeyContext::new_with_defaults();
         key_context.add("BufferSearchBar");
         if in_replace {
             key_context.add("in_replace");
@@ -426,16 +422,13 @@ impl ToolbarItemView for BufferSearchBar {
         }
         ToolbarItemLocation::Hidden
     }
-
-    fn row_count(&self, _: &WindowContext<'_>) -> usize {
-        1
-    }
 }
 
 impl BufferSearchBar {
     pub fn register(registrar: &mut impl SearchActionsRegistrar) {
         registrar.register_handler(ForDeployed(|this, _: &FocusSearch, cx| {
             this.query_editor.focus_handle(cx).focus(cx);
+            this.select_query(cx);
         }));
         registrar.register_handler(ForDeployed(|this, action: &ToggleCaseSensitive, cx| {
             if this.supported_options().case {
@@ -843,6 +836,10 @@ impl BufferSearchBar {
         }
     }
 
+    pub fn has_active_match(&self) -> bool {
+        self.active_match_index.is_some()
+    }
+
     fn clear_matches(&mut self, cx: &mut ViewContext<Self>) {
         let mut active_item_matches = None;
         for (searchable_item, matches) in self.searchable_items_with_matches.drain() {
@@ -1093,9 +1090,10 @@ mod tests {
     use std::ops::Range;
 
     use super::*;
-    use editor::{DisplayPoint, Editor};
+    use editor::{display_map::DisplayRow, DisplayPoint, Editor};
     use gpui::{Context, Hsla, TestAppContext, VisualTestContext};
     use language::Buffer;
+    use project::Project;
     use smol::stream::StreamExt as _;
     use unindent::Unindent as _;
 
@@ -1106,6 +1104,7 @@ mod tests {
             editor::init(cx);
 
             language::init(cx);
+            Project::init_settings(cx);
             theme::init(theme::LoadThemes::JustBase, cx);
         });
     }
@@ -1158,8 +1157,8 @@ mod tests {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
                 &[
-                    DisplayPoint::new(2, 17)..DisplayPoint::new(2, 19),
-                    DisplayPoint::new(2, 43)..DisplayPoint::new(2, 45),
+                    DisplayPoint::new(DisplayRow(2), 17)..DisplayPoint::new(DisplayRow(2), 19),
+                    DisplayPoint::new(DisplayRow(2), 43)..DisplayPoint::new(DisplayRow(2), 45),
                 ]
             );
         });
@@ -1173,7 +1172,7 @@ mod tests {
         editor.update(cx, |editor, cx| {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
-                &[DisplayPoint::new(2, 43)..DisplayPoint::new(2, 45),]
+                &[DisplayPoint::new(DisplayRow(2), 43)..DisplayPoint::new(DisplayRow(2), 45),]
             );
         });
 
@@ -1187,13 +1186,13 @@ mod tests {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
                 &[
-                    DisplayPoint::new(0, 24)..DisplayPoint::new(0, 26),
-                    DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43),
-                    DisplayPoint::new(2, 71)..DisplayPoint::new(2, 73),
-                    DisplayPoint::new(3, 1)..DisplayPoint::new(3, 3),
-                    DisplayPoint::new(3, 11)..DisplayPoint::new(3, 13),
-                    DisplayPoint::new(3, 56)..DisplayPoint::new(3, 58),
-                    DisplayPoint::new(3, 60)..DisplayPoint::new(3, 62),
+                    DisplayPoint::new(DisplayRow(0), 24)..DisplayPoint::new(DisplayRow(0), 26),
+                    DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43),
+                    DisplayPoint::new(DisplayRow(2), 71)..DisplayPoint::new(DisplayRow(2), 73),
+                    DisplayPoint::new(DisplayRow(3), 1)..DisplayPoint::new(DisplayRow(3), 3),
+                    DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13),
+                    DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58),
+                    DisplayPoint::new(DisplayRow(3), 60)..DisplayPoint::new(DisplayRow(3), 62),
                 ]
             );
         });
@@ -1208,16 +1207,18 @@ mod tests {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
                 &[
-                    DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43),
-                    DisplayPoint::new(3, 11)..DisplayPoint::new(3, 13),
-                    DisplayPoint::new(3, 56)..DisplayPoint::new(3, 58),
+                    DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43),
+                    DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13),
+                    DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58),
                 ]
             );
         });
 
         editor.update(cx, |editor, cx| {
             editor.change_selections(None, cx, |s| {
-                s.select_display_ranges([DisplayPoint::new(0, 0)..DisplayPoint::new(0, 0)])
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(0), 0)..DisplayPoint::new(DisplayRow(0), 0)
+                ])
             });
         });
         search_bar.update(cx, |search_bar, cx| {
@@ -1225,7 +1226,7 @@ mod tests {
             search_bar.select_next_match(&SelectNextMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43)]
+                [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1236,7 +1237,7 @@ mod tests {
             search_bar.select_next_match(&SelectNextMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 11)..DisplayPoint::new(3, 13)]
+                [DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1247,7 +1248,7 @@ mod tests {
             search_bar.select_next_match(&SelectNextMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 56)..DisplayPoint::new(3, 58)]
+                [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1258,7 +1259,7 @@ mod tests {
             search_bar.select_next_match(&SelectNextMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43)]
+                [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1269,7 +1270,7 @@ mod tests {
             search_bar.select_prev_match(&SelectPrevMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 56)..DisplayPoint::new(3, 58)]
+                [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1280,7 +1281,7 @@ mod tests {
             search_bar.select_prev_match(&SelectPrevMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 11)..DisplayPoint::new(3, 13)]
+                [DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1291,7 +1292,7 @@ mod tests {
             search_bar.select_prev_match(&SelectPrevMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43)]
+                [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1302,7 +1303,9 @@ mod tests {
         // the closest match to the left.
         editor.update(cx, |editor, cx| {
             editor.change_selections(None, cx, |s| {
-                s.select_display_ranges([DisplayPoint::new(1, 0)..DisplayPoint::new(1, 0)])
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(1), 0)..DisplayPoint::new(DisplayRow(1), 0)
+                ])
             });
         });
         search_bar.update(cx, |search_bar, cx| {
@@ -1310,7 +1313,7 @@ mod tests {
             search_bar.select_prev_match(&SelectPrevMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43)]
+                [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1321,7 +1324,9 @@ mod tests {
         // closest match to the right.
         editor.update(cx, |editor, cx| {
             editor.change_selections(None, cx, |s| {
-                s.select_display_ranges([DisplayPoint::new(1, 0)..DisplayPoint::new(1, 0)])
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(1), 0)..DisplayPoint::new(DisplayRow(1), 0)
+                ])
             });
         });
         search_bar.update(cx, |search_bar, cx| {
@@ -1329,7 +1334,7 @@ mod tests {
             search_bar.select_next_match(&SelectNextMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 11)..DisplayPoint::new(3, 13)]
+                [DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1340,7 +1345,9 @@ mod tests {
         // the last match.
         editor.update(cx, |editor, cx| {
             editor.change_selections(None, cx, |s| {
-                s.select_display_ranges([DisplayPoint::new(3, 60)..DisplayPoint::new(3, 60)])
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(3), 60)..DisplayPoint::new(DisplayRow(3), 60)
+                ])
             });
         });
         search_bar.update(cx, |search_bar, cx| {
@@ -1348,7 +1355,7 @@ mod tests {
             search_bar.select_prev_match(&SelectPrevMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 56)..DisplayPoint::new(3, 58)]
+                [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1359,7 +1366,9 @@ mod tests {
         // first match.
         editor.update(cx, |editor, cx| {
             editor.change_selections(None, cx, |s| {
-                s.select_display_ranges([DisplayPoint::new(3, 60)..DisplayPoint::new(3, 60)])
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(3), 60)..DisplayPoint::new(DisplayRow(3), 60)
+                ])
             });
         });
         search_bar.update(cx, |search_bar, cx| {
@@ -1367,7 +1376,7 @@ mod tests {
             search_bar.select_next_match(&SelectNextMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(0, 41)..DisplayPoint::new(0, 43)]
+                [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1378,7 +1387,9 @@ mod tests {
         // selects the last match.
         editor.update(cx, |editor, cx| {
             editor.change_selections(None, cx, |s| {
-                s.select_display_ranges([DisplayPoint::new(0, 0)..DisplayPoint::new(0, 0)])
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(0), 0)..DisplayPoint::new(DisplayRow(0), 0)
+                ])
             });
         });
         search_bar.update(cx, |search_bar, cx| {
@@ -1386,7 +1397,7 @@ mod tests {
             search_bar.select_prev_match(&SelectPrevMatch, cx);
             assert_eq!(
                 editor.update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(3, 56)..DisplayPoint::new(3, 58)]
+                [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
         search_bar.update(cx, |search_bar, _| {
@@ -1415,7 +1426,7 @@ mod tests {
         editor.update(cx, |editor, cx| {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
-                &[DisplayPoint::new(2, 43)..DisplayPoint::new(2, 45),]
+                &[DisplayPoint::new(DisplayRow(2), 43)..DisplayPoint::new(DisplayRow(2), 45),]
             );
         });
 
@@ -1440,7 +1451,7 @@ mod tests {
         editor.update(cx, |editor, cx| {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
-                &[DisplayPoint::new(0, 35)..DisplayPoint::new(0, 40),]
+                &[DisplayPoint::new(DisplayRow(0), 35)..DisplayPoint::new(DisplayRow(0), 40),]
             );
         });
 
@@ -2042,8 +2053,8 @@ mod tests {
             assert_eq!(
                 display_points_of(editor.all_text_background_highlights(cx)),
                 &[
-                    DisplayPoint::new(0, 10)..DisplayPoint::new(0, 20),
-                    DisplayPoint::new(1, 9)..DisplayPoint::new(1, 19),
+                    DisplayPoint::new(DisplayRow(0), 10)..DisplayPoint::new(DisplayRow(0), 20),
+                    DisplayPoint::new(DisplayRow(1), 9)..DisplayPoint::new(DisplayRow(1), 19),
                 ],
             );
         });

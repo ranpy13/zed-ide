@@ -1,67 +1,37 @@
-use crate::Location;
+use std::ops::Range;
+
+use crate::{Location, Runnable};
 
 use anyhow::Result;
+use collections::HashMap;
 use gpui::AppContext;
-use task::{TaskTemplates, TaskVariables, VariableName};
+use task::{TaskTemplates, TaskVariables};
+use text::BufferId;
 
-/// Language Contexts are used by Zed tasks to extract information about source file.
+pub struct RunnableRange {
+    pub buffer_id: BufferId,
+    pub run_range: Range<usize>,
+    pub full_range: Range<usize>,
+    pub runnable: Runnable,
+    pub extra_captures: HashMap<String, String>,
+}
+/// Language Contexts are used by Zed tasks to extract information about the source file where the tasks are supposed to be scheduled from.
+/// Multiple context providers may be used together: by default, Zed provides a base [`BasicContextProvider`] context that fills all non-custom [`VariableName`] variants.
+///
+/// The context will be used to fill data for the tasks, and filter out the ones that do not have the variables required.
 pub trait ContextProvider: Send + Sync {
-    fn build_context(&self, _: Location, _: &mut AppContext) -> Result<TaskVariables> {
+    /// Builds a specific context to be placed on top of the basic one (replacing all conflicting entries) and to be used for task resolving later.
+    fn build_context(
+        &self,
+        _variables: &TaskVariables,
+        _location: &Location,
+        _cx: &mut AppContext,
+    ) -> Result<TaskVariables> {
         Ok(TaskVariables::default())
     }
 
+    /// Provides all tasks, associated with the current language.
     fn associated_tasks(&self) -> Option<TaskTemplates> {
         None
-    }
-}
-
-/// A context provider that finds out what symbol is currently focused in the buffer.
-pub struct SymbolContextProvider;
-
-impl ContextProvider for SymbolContextProvider {
-    fn build_context(
-        &self,
-        location: Location,
-        cx: &mut AppContext,
-    ) -> gpui::Result<TaskVariables> {
-        let symbols = location
-            .buffer
-            .read(cx)
-            .snapshot()
-            .symbols_containing(location.range.start, None);
-        let symbol = symbols.unwrap_or_default().last().map(|symbol| {
-            let range = symbol
-                .name_ranges
-                .last()
-                .cloned()
-                .unwrap_or(0..symbol.text.len());
-            symbol.text[range].to_string()
-        });
-        Ok(TaskVariables::from_iter(
-            Some(VariableName::Symbol).zip(symbol),
-        ))
-    }
-}
-
-/// A ContextProvider that doesn't provide any task variables on it's own, though it has some associated tasks.
-pub struct ContextProviderWithTasks {
-    templates: TaskTemplates,
-}
-
-impl ContextProviderWithTasks {
-    pub fn new(definitions: TaskTemplates) -> Self {
-        Self {
-            templates: definitions,
-        }
-    }
-}
-
-impl ContextProvider for ContextProviderWithTasks {
-    fn associated_tasks(&self) -> Option<TaskTemplates> {
-        Some(self.templates.clone())
-    }
-
-    fn build_context(&self, location: Location, cx: &mut AppContext) -> Result<TaskVariables> {
-        SymbolContextProvider.build_context(location, cx)
     }
 }

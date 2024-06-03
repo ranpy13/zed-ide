@@ -7,6 +7,8 @@ pub use font_features::*;
 pub use line::*;
 pub use line_layout::*;
 pub use line_wrapper::*;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     px, Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
@@ -311,6 +313,10 @@ impl WindowTextSystem {
         self.line_layout_cache.reuse_layouts(index)
     }
 
+    pub(crate) fn truncate_layouts(&self, index: LineLayoutIndex) {
+        self.line_layout_cache.truncate_layouts(index)
+    }
+
     /// Shape the given line, at the given font_size, for painting to the screen.
     /// Subsets of the line can be styled independently with the `runs` parameter.
     ///
@@ -550,7 +556,7 @@ impl DerefMut for LineWrapperHandle {
 
 /// The degree of blackness or stroke thickness of a font. This value ranges from 100.0 to 900.0,
 /// with 400.0 as normal.
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Deserialize, Serialize, JsonSchema)]
 pub struct FontWeight(pub f32);
 
 impl Default for FontWeight {

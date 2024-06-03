@@ -24,13 +24,15 @@ impl SvgRenderer {
         Self { asset_source }
     }
 
-    pub fn render(&self, params: &RenderSvgParams) -> Result<Vec<u8>> {
+    pub fn render(&self, params: &RenderSvgParams) -> Result<Option<Vec<u8>>> {
         if params.size.is_zero() {
             return Err(anyhow!("can't render at a zero size"));
         }
 
         // Load the tree.
-        let bytes = self.asset_source.load(&params.path)?;
+        let Some(bytes) = self.asset_source.load(&params.path)? else {
+            return Ok(None);
+        };
 
         let pixmap = self.render_pixmap(&bytes, SvgSize::Size(params.size))?;
 
@@ -40,7 +42,7 @@ impl SvgRenderer {
             .iter()
             .map(|p| p.alpha())
             .collect::<Vec<_>>();
-        Ok(alpha_mask)
+        Ok(Some(alpha_mask))
     }
 
     pub fn render_pixmap(&self, bytes: &[u8], size: SvgSize) -> Result<Pixmap, usvg::Error> {
@@ -55,11 +57,12 @@ impl SvgRenderer {
         };
 
         // Render the SVG to a pixmap with the specified width and height.
-        let mut pixmap =
-            resvg::tiny_skia::Pixmap::new(size.width.into(), size.height.into()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width.into(), size.height.into())
+            .ok_or(usvg::Error::InvalidSize)?;
 
         let transform = tree.view_box().to_transform(
-            resvg::tiny_skia::Size::from_wh(size.width.0 as f32, size.height.0 as f32).unwrap(),
+            resvg::tiny_skia::Size::from_wh(size.width.0 as f32, size.height.0 as f32)
+                .ok_or(usvg::Error::InvalidSize)?,
         );
 
         resvg::render(&tree, transform, &mut pixmap.as_mut());

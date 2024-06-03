@@ -712,7 +712,7 @@ impl Size<Length> {
 /// assert_eq!(bounds.origin, origin);
 /// assert_eq!(bounds.size, size);
 /// ```
-#[derive(Refineable, Clone, Default, Debug, Eq, PartialEq)]
+#[derive(Refineable, Clone, Default, Debug, Eq, PartialEq, Hash)]
 #[refineable(Debug)]
 #[repr(C)]
 pub struct Bounds<T: Clone + Default + Debug> {
@@ -1257,6 +1257,7 @@ where
     ///     origin: Point { x: 15.0, y: 15.0 },
     ///     size: Size { width: 15.0, height: 30.0 },
     /// });
+    /// ```
     pub fn map<U>(&self, f: impl Fn(T) -> U) -> Bounds<U>
     where
         U: Clone + Default + Debug,
@@ -1283,6 +1284,7 @@ where
     ///     origin: Point { x: 15.0, y: 15.0 },
     ///     size: Size { width: 10.0, height: 20.0 },
     /// });
+    /// ```
     pub fn map_origin(self, f: impl Fn(Point<T>) -> Point<T>) -> Bounds<T> {
         Bounds {
             origin: f(self.origin),

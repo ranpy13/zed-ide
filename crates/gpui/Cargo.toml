@@ -12,9 +12,14 @@ workspace = true
 
 [features]
 default = []
-test-support = ["backtrace", "collections/test-support", "util/test-support"]
+test-support = [
+    "backtrace",
+    "collections/test-support",
+    "util/test-support",
+    "http/test-support",
+]
 runtime_shaders = []
-macos-blade = ["blade-graphics", "blade-macros", "blade-rwh", "bytemuck"]
+macos-blade = ["blade-graphics", "blade-macros", "blade-util", "bytemuck"]
 
 [lib]
 path = "src/gpui.rs"
@@ -26,7 +31,7 @@ async-task = "4.7"
 backtrace = { version = "0.3", optional = true }
 blade-graphics = { workspace = true, optional = true }
 blade-macros = { workspace = true, optional = true }
-blade-rwh = { workspace = true, optional = true }
+blade-util = { workspace = true, optional = true }
 bytemuck = { version = "1", optional = true }
 collections.workspace = true
 ctor.workspace = true
@@ -36,6 +41,7 @@ etagere = "0.2"
 futures.workspace = true
 font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "5a5c4d4" }
 gpui_macros.workspace = true
+http.workspace = true
 image = "0.23"
 itertools.workspace = true
 lazy_static.workspace = true
@@ -62,7 +68,7 @@ slotmap = "1.0.6"
 smallvec.workspace = true
 smol.workspace = true
 sum_tree.workspace = true
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "1876f72bee5e376023eaa518aa7b8a34c769bd1b" }
+taffy = "0.4.3"
 thiserror.workspace = true
 time.workspace = true
 util.workspace = true
@@ -73,6 +79,7 @@ waker-fn = "1.1.0"
 backtrace = "0.3"
 collections = { workspace = true, features = ["test-support"] }
 util = { workspace = true, features = ["test-support"] }
+http = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 bindgen = "0.65.1"
@@ -92,17 +99,16 @@ objc = "0.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 flume = "0.11"
-#TODO: use these on all platforms
 blade-graphics.workspace = true
 blade-macros.workspace = true
-blade-rwh.workspace = true
+blade-util.workspace = true
 bytemuck = "1"
 cosmic-text = "0.11.2"
 copypasta = "0.10.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 as-raw-xcb-connection = "1"
-ashpd = "0.8.0"
+ashpd.workspace = true
 calloop = "0.12.4"
 calloop-wayland-source = "0.2.0"
 wayland-backend = { version = "0.3.3", features = ["client_system"] }
@@ -113,13 +119,30 @@ wayland-protocols = { version = "0.31.2", features = [
     "staging",
     "unstable",
 ] }
+wayland-protocols-plasma = { version = "0.2.0", features = ["client"] }
 oo7 = "0.3.0"
 open = "5.1.2"
-x11rb = { version = "0.13.0", features = ["allow-unsafe-code", "xkb", "randr"] }
+filedescriptor = "0.8.2"
+x11rb = { version = "0.13.0", features = [
+    "allow-unsafe-code",
+    "xkb",
+    "randr",
+    "xinput",
+    "cursor",
+    "resource_manager",
+] }
 xkbcommon = { version = "0.7", features = ["wayland", "x11"] }
+xim = { git = "https://github.com/npmania/xim-rs", rev = "27132caffc5b9bc9c432ca4afad184ab6e7c16af", features = [
+    "x11rb-xcb",
+    "x11rb-client",
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+windows-core = "0.56"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "2.4"
 
 [[example]]
 name = "hello_world"

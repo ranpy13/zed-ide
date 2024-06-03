@@ -31,14 +31,17 @@ pub fn init(assets: impl AssetSource, cx: &mut AppContext) {
 }
 
 impl FileIcons {
+    pub fn get(cx: &AppContext) -> &Self {
+        cx.global::<FileIcons>()
+    }
+
     pub fn new(assets: impl AssetSource) -> Self {
         assets
             .load("icons/file_icons/file_types.json")
-            .and_then(|file| {
-                serde_json::from_str::<FileIcons>(str::from_utf8(&file).unwrap())
-                    .map_err(Into::into)
-            })
-            .unwrap_or_else(|_| FileIcons {
+            .ok()
+            .flatten()
+            .and_then(|file| serde_json::from_str::<FileIcons>(str::from_utf8(&file).unwrap()).ok())
+            .unwrap_or_else(|| FileIcons {
                 stems: HashMap::default(),
                 suffixes: HashMap::default(),
                 types: HashMap::default(),

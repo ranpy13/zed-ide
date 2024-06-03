@@ -13,20 +13,20 @@ use editor::{
 };
 use gpui::{
     actions, div, Action, AnyElement, AnyView, AppContext, Context as _, Element, EntityId,
-    EventEmitter, FocusHandle, FocusableView, FontStyle, FontWeight, Global, Hsla,
-    InteractiveElement, IntoElement, Model, ModelContext, ParentElement, Point, Render,
-    SharedString, Styled, Subscription, Task, TextStyle, View, ViewContext, VisualContext,
-    WeakModel, WeakView, WhiteSpace, WindowContext,
+    EventEmitter, FocusHandle, FocusableView, FontStyle, Global, Hsla, InteractiveElement,
+    IntoElement, Model, ModelContext, ParentElement, Point, Render, SharedString, Styled,
+    Subscription, Task, TextStyle, UpdateGlobal, View, ViewContext, VisualContext, WeakModel,
+    WeakView, WhiteSpace, WindowContext,
 };
 use menu::Confirm;
-use project::{search::SearchQuery, search_history::SearchHistoryCursor, Project};
+use project::{search::SearchQuery, search_history::SearchHistoryCursor, Project, ProjectPath};
 use settings::Settings;
 use smol::stream::StreamExt;
 use std::{
     any::{Any, TypeId},
     mem,
     ops::{Not, Range},
-    path::{Path, PathBuf},
+    path::Path,
 };
 use theme::ThemeSettings;
 use ui::{
@@ -53,8 +53,6 @@ actions!(
 struct ActiveSettings(HashMap<WeakModel<Project>, ProjectSearchSettings>);
 
 impl Global for ActiveSettings {}
-
-const SEARCH_CONTEXT: u32 = 2;
 
 pub fn init(cx: &mut AppContext) {
     cx.set_global(ActiveSettings::default());
@@ -234,7 +232,7 @@ impl ProjectSearch {
                                     excerpts.stream_excerpts_with_context_lines(
                                         buffer,
                                         ranges,
-                                        SEARCH_CONTEXT,
+                                        editor::DEFAULT_MULTIBUFFER_CONTEXT,
                                         cx,
                                     )
                                 })
@@ -441,7 +439,7 @@ impl Item for ProjectSearchView {
     fn save_as(
         &mut self,
         _: Model<Project>,
-        _: PathBuf,
+        _: ProjectPath,
         _: &mut ViewContext<Self>,
     ) -> Task<anyhow::Result<()>> {
         unreachable!("save_as should not have been called")
@@ -458,7 +456,7 @@ impl Item for ProjectSearchView {
 
     fn clone_on_split(
         &self,
-        _workspace_id: WorkspaceId,
+        _workspace_id: Option<WorkspaceId>,
         cx: &mut ViewContext<Self>,
     ) -> Option<View<Self>>
     where
@@ -528,8 +526,8 @@ impl Item for ProjectSearchView {
 impl ProjectSearchView {
     fn toggle_filters(&mut self, cx: &mut ViewContext<Self>) {
         self.filters_enabled = !self.filters_enabled;
-        cx.update_global(|state: &mut ActiveSettings, cx| {
-            state.0.insert(
+        ActiveSettings::update_global(cx, |settings, cx| {
+            settings.0.insert(
                 self.model.read(cx).project.downgrade(),
                 self.current_settings(),
             );
@@ -542,10 +540,11 @@ impl ProjectSearchView {
             filters_enabled: self.filters_enabled,
         }
     }
+
     fn toggle_search_option(&mut self, option: SearchOptions, cx: &mut ViewContext<Self>) {
         self.search_options.toggle(option);
-        cx.update_global(|state: &mut ActiveSettings, cx| {
-            state.0.insert(
+        ActiveSettings::update_global(cx, |settings, cx| {
+            settings.0.insert(
                 self.model.read(cx).project.downgrade(),
                 self.current_settings(),
             );
@@ -654,7 +653,7 @@ impl ProjectSearchView {
             editor
         });
         let results_editor = cx.new_view(|cx| {
-            let mut editor = Editor::for_multibuffer(excerpts, Some(project.clone()), cx);
+            let mut editor = Editor::for_multibuffer(excerpts, Some(project.clone()), true, cx);
             editor.set_searchable(false);
             editor
         });
@@ -740,7 +739,7 @@ impl ProjectSearchView {
 
         let model = cx.new_model(|cx| ProjectSearch::new(workspace.project().clone(), cx));
         let search = cx.new_view(|cx| ProjectSearchView::new(model, cx, None));
-        workspace.add_item_to_active_pane(Box::new(search.clone()), cx);
+        workspace.add_item_to_active_pane(Box::new(search.clone()), None, cx);
         search.update(cx, |search, cx| {
             search
                 .included_files_editor
@@ -791,6 +790,7 @@ impl ProjectSearchView {
                 });
                 workspace.add_item_to_active_pane(
                     Box::new(cx.new_view(|cx| ProjectSearchView::new(model, cx, None))),
+                    None,
                     cx,
                 );
             }
@@ -840,7 +840,7 @@ impl ProjectSearchView {
             let model = cx.new_model(|cx| ProjectSearch::new(workspace.project().clone(), cx));
             let view = cx.new_view(|cx| ProjectSearchView::new(model, cx, settings));
 
-            workspace.add_item_to_active_pane(Box::new(view.clone()), cx);
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, cx);
             view
         };
 
@@ -1309,9 +1309,9 @@ impl ProjectSearchBar {
                 cx.theme().colors().text
             },
             font_family: settings.buffer_font.family.clone(),
-            font_features: settings.buffer_font.features,
+            font_features: settings.buffer_font.features.clone(),
             font_size: rems(0.875).into(),
-            font_weight: FontWeight::NORMAL,
+            font_weight: settings.buffer_font.weight,
             font_style: FontStyle::Normal,
             line_height: relative(1.3),
             background_color: None,
@@ -1630,15 +1630,6 @@ impl ToolbarItemView for ProjectSearchBar {
             ToolbarItemLocation::Hidden
         }
     }
-
-    fn row_count(&self, cx: &WindowContext<'_>) -> usize {
-        if let Some(search) = self.active_project_search.as_ref() {
-            if search.read(cx).filters_enabled {
-                return 2;
-            }
-        }
-        1
-    }
 }
 
 fn register_workspace_action<A: Action>(
@@ -1698,7 +1689,7 @@ fn register_workspace_action_for_present_search<A: Action>(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use editor::DisplayPoint;
+    use editor::{display_map::DisplayRow, DisplayPoint};
     use gpui::{Action, TestAppContext, WindowHandle};
     use project::FakeFs;
     use serde_json::json;
@@ -1731,7 +1722,7 @@ pub mod tests {
                 search_view
                     .results_editor
                     .update(cx, |editor, cx| editor.display_text(cx)),
-                "\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\nconst TWO: usize = one::ONE + one::ONE;"
+                "\n\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\n\n\nconst TWO: usize = one::ONE + one::ONE;\n"
             );
             let match_background_color = cx.theme().colors().search_match_background;
             assert_eq!(
@@ -1740,15 +1731,15 @@ pub mod tests {
                     .update(cx, |editor, cx| editor.all_text_background_highlights(cx)),
                 &[
                     (
-                        DisplayPoint::new(2, 32)..DisplayPoint::new(2, 35),
+                        DisplayPoint::new(DisplayRow(3), 32)..DisplayPoint::new(DisplayRow(3), 35),
                         match_background_color
                     ),
                     (
-                        DisplayPoint::new(2, 37)..DisplayPoint::new(2, 40),
+                        DisplayPoint::new(DisplayRow(3), 37)..DisplayPoint::new(DisplayRow(3), 40),
                         match_background_color
                     ),
                     (
-                        DisplayPoint::new(5, 6)..DisplayPoint::new(5, 9),
+                        DisplayPoint::new(DisplayRow(8), 6)..DisplayPoint::new(DisplayRow(8), 9),
                         match_background_color
                     )
                 ]
@@ -1758,7 +1749,7 @@ pub mod tests {
                 search_view
                     .results_editor
                     .update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                [DisplayPoint::new(2, 32)..DisplayPoint::new(2, 35)]
+                [DisplayPoint::new(DisplayRow(3), 32)..DisplayPoint::new(DisplayRow(3), 35)]
             );
 
             search_view.select_match(Direction::Next, cx);
@@ -1771,7 +1762,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                    [DisplayPoint::new(2, 37)..DisplayPoint::new(2, 40)]
+                    [DisplayPoint::new(DisplayRow(3), 37)..DisplayPoint::new(DisplayRow(3), 40)]
                 );
                 search_view.select_match(Direction::Next, cx);
             })
@@ -1784,7 +1775,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                    [DisplayPoint::new(5, 6)..DisplayPoint::new(5, 9)]
+                    [DisplayPoint::new(DisplayRow(8), 6)..DisplayPoint::new(DisplayRow(8), 9)]
                 );
                 search_view.select_match(Direction::Next, cx);
             })
@@ -1797,7 +1788,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                    [DisplayPoint::new(2, 32)..DisplayPoint::new(2, 35)]
+                    [DisplayPoint::new(DisplayRow(3), 32)..DisplayPoint::new(DisplayRow(3), 35)]
                 );
                 search_view.select_match(Direction::Prev, cx);
             })
@@ -1810,7 +1801,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                    [DisplayPoint::new(5, 6)..DisplayPoint::new(5, 9)]
+                    [DisplayPoint::new(DisplayRow(8), 6)..DisplayPoint::new(DisplayRow(8), 9)]
                 );
                 search_view.select_match(Direction::Prev, cx);
             })
@@ -1823,7 +1814,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.selections.display_ranges(cx)),
-                    [DisplayPoint::new(2, 37)..DisplayPoint::new(2, 40)]
+                    [DisplayPoint::new(DisplayRow(3), 37)..DisplayPoint::new(DisplayRow(3), 40)]
                 );
             })
             .unwrap();
@@ -1991,7 +1982,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.display_text(cx)),
-                    "\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\nconst TWO: usize = one::ONE + one::ONE;",
+                    "\n\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\n\n\nconst TWO: usize = one::ONE + one::ONE;\n",
                     "Search view results should match the query"
                 );
                 assert!(
@@ -2030,7 +2021,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.display_text(cx)),
-                    "\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\nconst TWO: usize = one::ONE + one::ONE;",
+                    "\n\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\n\n\nconst TWO: usize = one::ONE + one::ONE;\n",
                     "Results should be unchanged after search view 2nd open in a row"
                 );
                 assert!(
@@ -2222,7 +2213,7 @@ pub mod tests {
                     search_view
                         .results_editor
                         .update(cx, |editor, cx| editor.display_text(cx)),
-                    "\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\nconst TWO: usize = one::ONE + one::ONE;",
+                    "\n\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\n\n\nconst TWO: usize = one::ONE + one::ONE;\n",
                     "Search view results should match the query"
                 );
                 assert!(
@@ -2277,7 +2268,7 @@ pub mod tests {
                         search_view
                             .results_editor
                             .update(cx, |editor, cx| editor.display_text(cx)),
-                        "\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\nconst TWO: usize = one::ONE + one::ONE;",
+                        "\n\n\nconst THREE: usize = one::ONE + two::TWO;\n\n\n\n\nconst TWO: usize = one::ONE + one::ONE;\n",
                         "Results of the first search view should not update too"
                     );
                     assert!(
@@ -2326,7 +2317,7 @@ pub mod tests {
                         search_view_2
                             .results_editor
                             .update(cx, |editor, cx| editor.display_text(cx)),
-                        "\n\nconst FOUR: usize = one::ONE + three::THREE;",
+                        "\n\n\nconst FOUR: usize = one::ONE + three::THREE;\n",
                         "New search view with the updated query should have new search results"
                     );
                     assert!(
@@ -2471,7 +2462,7 @@ pub mod tests {
                 search_view
                     .results_editor
                     .update(cx, |editor, cx| editor.display_text(cx)),
-                "\n\nconst ONE: usize = 1;\n\n\nconst TWO: usize = one::ONE + one::ONE;",
+                "\n\n\nconst ONE: usize = 1;\n\n\n\n\nconst TWO: usize = one::ONE + one::ONE;\n",
                 "New search in directory should have a filter that matches a certain directory"
             );
                 })

@@ -1495,6 +1495,33 @@ impl LspCommand for GetCompletions {
             })?
             .ok_or_else(|| anyhow!("no such language server"))?;
 
+        let item_defaults = response_list
+            .as_ref()
+            .and_then(|list| list.item_defaults.as_ref());
+
+        if let Some(item_defaults) = item_defaults {
+            let default_data = item_defaults.data.as_ref();
+            let default_commit_characters = item_defaults.commit_characters.as_ref();
+            let default_insert_text_mode = item_defaults.insert_text_mode.as_ref();
+
+            if default_data.is_some()
+                || default_commit_characters.is_some()
+                || default_insert_text_mode.is_some()
+            {
+                for item in completions.iter_mut() {
+                    if let Some(data) = default_data {
+                        item.data = Some(data.clone())
+                    }
+                    if let Some(characters) = default_commit_characters {
+                        item.commit_characters = Some(characters.clone())
+                    }
+                    if let Some(text_mode) = default_insert_text_mode {
+                        item.insert_text_mode = Some(*text_mode)
+                    }
+                }
+            }
+        }
+
         let mut completion_edits = Vec::new();
         buffer.update(&mut cx, |buffer, _cx| {
             let snapshot = buffer.snapshot();
@@ -1505,18 +1532,11 @@ impl LspCommand for GetCompletions {
                 let edit = match lsp_completion.text_edit.as_ref() {
                     // If the language server provides a range to overwrite, then
                     // check that the range is valid.
-                    Some(lsp::CompletionTextEdit::Edit(edit)) => {
-                        let range = range_from_lsp(edit.range);
-                        let start = snapshot.clip_point_utf16(range.start, Bias::Left);
-                        let end = snapshot.clip_point_utf16(range.end, Bias::Left);
-                        if start != range.start.0 || end != range.end.0 {
-                            log::info!("completion out of expected range");
-                            return false;
+                    Some(completion_text_edit) => {
+                        match parse_completion_text_edit(completion_text_edit, &snapshot) {
+                            Some(edit) => edit,
+                            None => return false,
                         }
-                        (
-                            snapshot.anchor_before(start)..snapshot.anchor_after(end),
-                            edit.new_text.clone(),
-                        )
                     }
 
                     // If the language server does not provide a range, then infer
@@ -1569,21 +1589,6 @@ impl LspCommand for GetCompletions {
                             .unwrap_or(&lsp_completion.label)
                             .clone();
                         (range, text)
-                    }
-
-                    Some(lsp::CompletionTextEdit::InsertAndReplace(edit)) => {
-                        let range = range_from_lsp(edit.insert);
-
-                        let start = snapshot.clip_point_utf16(range.start, Bias::Left);
-                        let end = snapshot.clip_point_utf16(range.end, Bias::Left);
-                        if start != range.start.0 || end != range.end.0 {
-                            log::info!("completion out of expected range");
-                            return false;
-                        }
-                        (
-                            snapshot.anchor_before(start)..snapshot.anchor_after(end),
-                            edit.new_text.clone(),
-                        )
                     }
                 };
 
@@ -1681,6 +1686,44 @@ impl LspCommand for GetCompletions {
 
     fn buffer_id_from_proto(message: &proto::GetCompletions) -> Result<BufferId> {
         BufferId::new(message.buffer_id)
+    }
+}
+
+pub(crate) fn parse_completion_text_edit(
+    edit: &lsp::CompletionTextEdit,
+    snapshot: &BufferSnapshot,
+) -> Option<(Range<Anchor>, String)> {
+    match edit {
+        lsp::CompletionTextEdit::Edit(edit) => {
+            let range = range_from_lsp(edit.range);
+            let start = snapshot.clip_point_utf16(range.start, Bias::Left);
+            let end = snapshot.clip_point_utf16(range.end, Bias::Left);
+            if start != range.start.0 || end != range.end.0 {
+                log::info!("completion out of expected range");
+                None
+            } else {
+                Some((
+                    snapshot.anchor_before(start)..snapshot.anchor_after(end),
+                    edit.new_text.clone(),
+                ))
+            }
+        }
+
+        lsp::CompletionTextEdit::InsertAndReplace(edit) => {
+            let range = range_from_lsp(edit.insert);
+
+            let start = snapshot.clip_point_utf16(range.start, Bias::Left);
+            let end = snapshot.clip_point_utf16(range.end, Bias::Left);
+            if start != range.start.0 || end != range.end.0 {
+                log::info!("completion out of expected range");
+                None
+            } else {
+                Some((
+                    snapshot.anchor_before(start)..snapshot.anchor_after(end),
+                    edit.new_text.clone(),
+                ))
+            }
+        }
     }
 }
 

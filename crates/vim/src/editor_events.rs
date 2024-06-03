@@ -1,8 +1,6 @@
 use crate::{insert::NormalBefore, Vim, VimModeSetting};
 use editor::{Editor, EditorEvent};
-use gpui::{
-    Action, AppContext, BorrowAppContext, Entity, EntityId, View, ViewContext, WindowContext,
-};
+use gpui::{Action, AppContext, Entity, EntityId, UpdateGlobal, View, ViewContext, WindowContext};
 use settings::{Settings, SettingsStore};
 
 pub fn init(cx: &mut AppContext) {
@@ -42,6 +40,9 @@ fn focused(editor: View<Editor>, cx: &mut WindowContext) {
 
 fn blurred(editor: View<Editor>, cx: &mut WindowContext) {
     Vim::update(cx, |vim, cx| {
+        if !vim.enabled {
+            return;
+        }
         if let Some(previous_editor) = vim.active_editor.clone() {
             vim.stop_recording_immediately(NormalBefore.boxed_clone());
             if previous_editor
@@ -51,11 +52,16 @@ fn blurred(editor: View<Editor>, cx: &mut WindowContext) {
                 vim.clear_operator(cx);
             }
         }
+        editor.update(cx, |editor, cx| {
+            if editor.use_modal_editing() {
+                editor.set_cursor_shape(language::CursorShape::Hollow, cx);
+            }
+        });
     });
 }
 
 fn released(entity_id: EntityId, cx: &mut AppContext) {
-    cx.update_global(|vim: &mut Vim, _| {
+    Vim::update_global(cx, |vim, _cx| {
         if vim
             .active_editor
             .as_ref()

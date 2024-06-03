@@ -1,6 +1,6 @@
 use std::fs;
 use zed::lsp::CompletionKind;
-use zed::{CodeLabel, CodeLabelSpan, LanguageServerId};
+use zed::{CodeLabel, CodeLabelSpan, LanguageServerId, SlashCommand};
 use zed_extension_api::{self as zed, Result};
 
 struct GleamExtension {
@@ -13,15 +13,14 @@ impl GleamExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<String> {
+        if let Some(path) = worktree.which("gleam") {
+            return Ok(path);
+        }
+
         if let Some(path) = &self.cached_binary_path {
             if fs::metadata(path).map_or(false, |stat| stat.is_file()) {
                 return Ok(path.clone());
             }
-        }
-
-        if let Some(path) = worktree.which("gleam") {
-            self.cached_binary_path = Some(path.clone());
-            return Ok(path);
         }
 
         zed::set_language_server_installation_status(
@@ -142,6 +141,28 @@ impl zed::Extension for GleamExtension {
             filter_range: (0..name.len()).into(),
             code,
         })
+    }
+
+    fn run_slash_command(
+        &self,
+        command: SlashCommand,
+        _argument: Option<String>,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<String>, String> {
+        match command.name.as_str() {
+            "gleam-project" => {
+                let mut message = String::new();
+                message.push_str("You are in a Gleam project.\n");
+
+                if let Some(gleam_toml) = worktree.read_text_file("gleam.toml").ok() {
+                    message.push_str("The `gleam.toml` is as follows:\n");
+                    message.push_str(&gleam_toml);
+                }
+
+                Ok(Some(message))
+            }
+            command => Err(format!("unknown slash command: \"{command}\"")),
+        }
     }
 }
 

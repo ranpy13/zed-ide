@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 use text::network::Network;
-use text::{BufferId, LineEnding};
+use text::{BufferId, LineEnding, LineIndent};
 use text::{Point, ToPoint};
 use unindent::Unindent as _;
 use util::{assert_set_eq, post_inc, test::marked_text_ranges, RandomCharIter};
@@ -184,6 +184,10 @@ async fn test_language_for_file_with_custom_file_types(cx: &mut TestAppContext) 
             settings.file_types.extend([
                 ("TypeScript".into(), vec!["js".into()]),
                 ("C++".into(), vec!["c".into()]),
+                (
+                    "Dockerfile".into(),
+                    vec!["Dockerfile".into(), "Dockerfile.*".into()],
+                ),
             ]);
         })
     });
@@ -223,6 +227,14 @@ async fn test_language_for_file_with_custom_file_types(cx: &mut TestAppContext) 
             },
             ..Default::default()
         },
+        LanguageConfig {
+            name: "Dockerfile".into(),
+            matcher: LanguageMatcher {
+                path_suffixes: vec!["Dockerfile".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     ] {
         languages.add(Arc::new(Language::new(config, None)));
     }
@@ -237,6 +249,11 @@ async fn test_language_for_file_with_custom_file_types(cx: &mut TestAppContext) 
         .await
         .unwrap();
     assert_eq!(language.name().as_ref(), "C++");
+    let language = cx
+        .read(|cx| languages.language_for_file(&file("Dockerfile.dev"), None, cx))
+        .await
+        .unwrap();
+    assert_eq!(language.name().as_ref(), "Dockerfile");
 }
 
 fn file(path: &str) -> Arc<dyn File> {
@@ -1818,7 +1835,7 @@ fn test_language_scope_at_with_javascript(cx: &mut AppContext) {
         let snapshot = buffer.snapshot();
 
         let config = snapshot.language_scope_at(0).unwrap();
-        assert_eq!(config.line_comment_prefixes().unwrap(), &[Arc::from("// ")]);
+        assert_eq!(config.line_comment_prefixes(), &[Arc::from("// ")]);
         // Both bracket pairs are enabled
         assert_eq!(
             config.brackets().map(|e| e.1).collect::<Vec<_>>(),
@@ -1828,10 +1845,7 @@ fn test_language_scope_at_with_javascript(cx: &mut AppContext) {
         let string_config = snapshot
             .language_scope_at(text.find("b\"").unwrap())
             .unwrap();
-        assert_eq!(
-            string_config.line_comment_prefixes().unwrap(),
-            &[Arc::from("// ")]
-        );
+        assert_eq!(string_config.line_comment_prefixes(), &[Arc::from("// ")]);
         // Second bracket pair is disabled
         assert_eq!(
             string_config.brackets().map(|e| e.1).collect::<Vec<_>>(),
@@ -1842,7 +1856,7 @@ fn test_language_scope_at_with_javascript(cx: &mut AppContext) {
         let element_config = snapshot
             .language_scope_at(text.find("<F>").unwrap())
             .unwrap();
-        assert_eq!(element_config.line_comment_prefixes(), None);
+        assert_eq!(element_config.line_comment_prefixes(), &[]);
         assert_eq!(
             element_config.block_comment_delimiters(),
             Some((&"{/*".into(), &"*/}".into()))
@@ -1856,10 +1870,7 @@ fn test_language_scope_at_with_javascript(cx: &mut AppContext) {
         let tag_config = snapshot
             .language_scope_at(text.find(" d=").unwrap() + 1)
             .unwrap();
-        assert_eq!(
-            tag_config.line_comment_prefixes().unwrap(),
-            &[Arc::from("// ")]
-        );
+        assert_eq!(tag_config.line_comment_prefixes(), &[Arc::from("// ")]);
         assert_eq!(
             tag_config.brackets().map(|e| e.1).collect::<Vec<_>>(),
             &[true, true]
@@ -1870,9 +1881,7 @@ fn test_language_scope_at_with_javascript(cx: &mut AppContext) {
             .language_scope_at(text.find('{').unwrap() + 1)
             .unwrap();
         assert_eq!(
-            expression_in_element_config
-                .line_comment_prefixes()
-                .unwrap(),
+            expression_in_element_config.line_comment_prefixes(),
             &[Arc::from("// ")]
         );
         assert_eq!(
@@ -1988,17 +1997,14 @@ fn test_language_scope_at_with_combined_injections(cx: &mut AppContext) {
 
         let snapshot = buffer.snapshot();
         let html_config = snapshot.language_scope_at(Point::new(2, 4)).unwrap();
-        assert_eq!(html_config.line_comment_prefixes(), Some(&vec![]));
+        assert_eq!(html_config.line_comment_prefixes(), &[]);
         assert_eq!(
             html_config.block_comment_delimiters(),
             Some((&"<!--".into(), &"-->".into()))
         );
 
         let ruby_config = snapshot.language_scope_at(Point::new(3, 12)).unwrap();
-        assert_eq!(
-            ruby_config.line_comment_prefixes().unwrap(),
-            &[Arc::from("# ")]
-        );
+        assert_eq!(ruby_config.line_comment_prefixes(), &[Arc::from("# ")]);
         assert_eq!(ruby_config.block_comment_delimiters(), None);
 
         buffer
@@ -2044,6 +2050,92 @@ fn test_serialization(cx: &mut gpui::AppContext) {
         buffer
     });
     assert_eq!(buffer2.read(cx).text(), "abcDF");
+}
+
+#[gpui::test]
+async fn test_find_matching_indent(cx: &mut TestAppContext) {
+    cx.update(|cx| init_settings(cx, |_| {}));
+
+    async fn enclosing_indent(
+        text: impl Into<String>,
+        buffer_row: u32,
+        cx: &mut TestAppContext,
+    ) -> Option<(Range<u32>, LineIndent)> {
+        let buffer = cx.new_model(|cx| Buffer::local(text, cx));
+        let snapshot = cx.read(|cx| buffer.read(cx).snapshot());
+        snapshot.enclosing_indent(buffer_row).await
+    }
+
+    assert_eq!(
+        enclosing_indent(
+            "
+        fn b() {
+            if c {
+                let d = 2;
+            }
+        }"
+            .unindent(),
+            1,
+            cx,
+        )
+        .await,
+        Some((
+            1..2,
+            LineIndent {
+                tabs: 0,
+                spaces: 4,
+                line_blank: false,
+            }
+        ))
+    );
+
+    assert_eq!(
+        enclosing_indent(
+            "
+        fn b() {
+            if c {
+                let d = 2;
+            }
+        }"
+            .unindent(),
+            2,
+            cx,
+        )
+        .await,
+        Some((
+            1..2,
+            LineIndent {
+                tabs: 0,
+                spaces: 4,
+                line_blank: false,
+            }
+        ))
+    );
+
+    assert_eq!(
+        enclosing_indent(
+            "
+        fn b() {
+            if c {
+                let d = 2;
+
+                let e = 5;
+            }
+        }"
+            .unindent(),
+            3,
+            cx,
+        )
+        .await,
+        Some((
+            1..4,
+            LineIndent {
+                tabs: 0,
+                spaces: 4,
+                line_blank: false,
+            }
+        ))
+    );
 }
 
 #[gpui::test(iterations = 100)]

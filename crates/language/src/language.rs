@@ -20,12 +20,14 @@ mod task_context;
 mod buffer_tests;
 pub mod markdown;
 
+use crate::language_settings::SoftWrap;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use collections::{HashMap, HashSet};
 use futures::Future;
-use gpui::{AppContext, AsyncAppContext, Model, Task};
+use gpui::{AppContext, AsyncAppContext, Model, SharedString, Task};
 pub use highlight_map::HighlightMap;
+use http::HttpClient;
 use lazy_static::lazy_static;
 use lsp::{CodeActionKind, LanguageServerBinary};
 use parking_lot::Mutex;
@@ -41,12 +43,11 @@ use smol::future::FutureExt as _;
 use std::num::NonZeroU32;
 use std::{
     any::Any,
-    cell::RefCell,
     ffi::OsStr,
     fmt::Debug,
     hash::Hash,
     mem,
-    ops::Range,
+    ops::{DerefMut, Range},
     path::{Path, PathBuf},
     pin::Pin,
     str,
@@ -55,11 +56,11 @@ use std::{
         Arc,
     },
 };
-use syntax_map::SyntaxSnapshot;
-pub use task_context::{ContextProvider, ContextProviderWithTasks, SymbolContextProvider};
+use syntax_map::{QueryCursorHandle, SyntaxSnapshot};
+use task::RunnableTag;
+pub use task_context::{ContextProvider, RunnableRange};
 use theme::SyntaxTheme;
-use tree_sitter::{self, wasmtime, Query, WasmStore};
-use util::http::HttpClient;
+use tree_sitter::{self, wasmtime, Query, QueryCursor, WasmStore};
 
 pub use buffer::Operation;
 pub use buffer::*;
@@ -71,10 +72,8 @@ pub use language_registry::{
 pub use lsp::LanguageServerId;
 pub use outline::{Outline, OutlineItem};
 pub use syntax_map::{OwnedSyntaxLayer, SyntaxLayer};
-pub use text::LineEnding;
+pub use text::{AnchorRangeExt, LineEnding};
 pub use tree_sitter::{Node, Parser, Tree, TreeCursor};
-
-use crate::language_settings::SoftWrap;
 
 /// Initializes the `language` crate.
 ///
@@ -83,22 +82,32 @@ pub fn init(cx: &mut AppContext) {
     language_settings::init(cx);
 }
 
-thread_local! {
-    static PARSER: RefCell<Parser> = {
-        let mut parser = Parser::new();
-        parser.set_wasm_store(WasmStore::new(WASM_ENGINE.clone()).unwrap()).unwrap();
-        RefCell::new(parser)
-    };
-}
+static QUERY_CURSORS: Mutex<Vec<QueryCursor>> = Mutex::new(vec![]);
+static PARSERS: Mutex<Vec<Parser>> = Mutex::new(vec![]);
 
 pub fn with_parser<F, R>(func: F) -> R
 where
     F: FnOnce(&mut Parser) -> R,
 {
-    PARSER.with(|parser| {
-        let mut parser = parser.borrow_mut();
-        func(&mut parser)
-    })
+    let mut parser = PARSERS.lock().pop().unwrap_or_else(|| {
+        let mut parser = Parser::new();
+        parser
+            .set_wasm_store(WasmStore::new(WASM_ENGINE.clone()).unwrap())
+            .unwrap();
+        parser
+    });
+    parser.set_included_ranges(&[]).unwrap();
+    let result = func(&mut parser);
+    PARSERS.lock().push(parser);
+    result
+}
+
+pub fn with_query_cursor<F, R>(func: F) -> R
+where
+    F: FnOnce(&mut QueryCursor) -> R,
+{
+    let mut cursor = QueryCursorHandle::new();
+    func(cursor.deref_mut())
 }
 
 lazy_static! {
@@ -143,7 +152,7 @@ pub struct CachedLspAdapter {
     pub name: LanguageServerName,
     pub disk_based_diagnostic_sources: Vec<String>,
     pub disk_based_diagnostics_progress_token: Option<String>,
-    pub language_ids: HashMap<String, String>,
+    language_ids: HashMap<String, String>,
     pub adapter: Arc<dyn LspAdapter>,
     pub reinstall_attempt_count: AtomicU64,
     /// Indicates whether this language server is the primary language server
@@ -237,6 +246,13 @@ impl CachedLspAdapter {
             .clone()
             .labels_for_symbols(symbols, language)
             .await
+    }
+
+    pub fn language_id(&self, language: &Language) -> String {
+        self.language_ids
+            .get(language.name().as_ref())
+            .cloned()
+            .unwrap_or_else(|| language.lsp_id())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -519,7 +535,7 @@ async fn try_fetch_server_binary<L: LspAdapter + 'static + Send + Sync + ?Sized>
     binary
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CodeLabel {
     /// The text to display.
     pub text: String,
@@ -584,13 +600,6 @@ pub struct LanguageConfig {
     /// or a whole-word search in buffer search.
     #[serde(default)]
     pub word_characters: HashSet<char>,
-    /// The name of a Prettier parser that should be used for this language.
-    #[serde(default)]
-    pub prettier_parser_name: Option<String>,
-    /// The names of any Prettier plugins that should be used for this language.
-    #[serde(default)]
-    pub prettier_plugins: Vec<Arc<str>>,
-
     /// Whether to indent lines using tab characters, as opposed to multiple
     /// spaces.
     #[serde(default)]
@@ -601,6 +610,10 @@ pub struct LanguageConfig {
     /// How to soft-wrap long lines of text.
     #[serde(default)]
     pub soft_wrap: Option<SoftWrap>,
+    /// The name of a Prettier parser that will be used for this language when no file path is available.
+    /// If there's a parser name in the language settings, that will be used instead.
+    #[serde(default)]
+    pub prettier_parser_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
@@ -682,12 +695,11 @@ impl Default for LanguageConfig {
             scope_opt_in_language_servers: Default::default(),
             overrides: Default::default(),
             word_characters: Default::default(),
-            prettier_parser_name: None,
-            prettier_plugins: Default::default(),
             collapsed_placeholder: Default::default(),
-            hard_tabs: Default::default(),
-            tab_size: Default::default(),
-            soft_wrap: Default::default(),
+            hard_tabs: None,
+            tab_size: None,
+            soft_wrap: None,
+            prettier_parser_name: None,
         }
     }
 }
@@ -828,6 +840,7 @@ pub struct Grammar {
     pub(crate) highlights_query: Option<Query>,
     pub(crate) brackets_config: Option<BracketConfig>,
     pub(crate) redactions_config: Option<RedactionConfig>,
+    pub(crate) runnable_config: Option<RunnableConfig>,
     pub(crate) indents_config: Option<IndentConfig>,
     pub outline_config: Option<OutlineConfig>,
     pub embedding_config: Option<EmbeddingConfig>,
@@ -874,6 +887,18 @@ struct RedactionConfig {
     pub redaction_capture_ix: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum RunnableCapture {
+    Named(SharedString),
+    Run,
+}
+
+struct RunnableConfig {
+    pub query: Query,
+    /// A mapping from capture indice to capture kind
+    pub extra_captures: Vec<RunnableCapture>,
+}
+
 struct OverrideConfig {
     query: Query,
     values: HashMap<u32, (String, LanguageConfigOverride)>,
@@ -915,6 +940,7 @@ impl Language {
                     injection_config: None,
                     override_config: None,
                     redactions_config: None,
+                    runnable_config: None,
                     error_query: Query::new(&ts_language, "(ERROR) @error").unwrap(),
                     ts_language,
                     highlight_map: Default::default(),
@@ -970,6 +996,11 @@ impl Language {
                 .with_redaction_query(query.as_ref())
                 .context("Error loading redaction query")?;
         }
+        if let Some(query) = queries.runnables {
+            self = self
+                .with_runnable_query(query.as_ref())
+                .context("Error loading tests query")?;
+        }
         Ok(self)
     }
 
@@ -978,6 +1009,31 @@ impl Language {
             .grammar_mut()
             .ok_or_else(|| anyhow!("cannot mutate grammar"))?;
         grammar.highlights_query = Some(Query::new(&grammar.ts_language, source)?);
+        Ok(self)
+    }
+
+    pub fn with_runnable_query(mut self, source: &str) -> Result<Self> {
+        let grammar = self
+            .grammar_mut()
+            .ok_or_else(|| anyhow!("cannot mutate grammar"))?;
+
+        let query = Query::new(&grammar.ts_language, source)?;
+        let mut extra_captures = Vec::with_capacity(query.capture_names().len());
+
+        for name in query.capture_names().iter() {
+            let kind = if *name == "run" {
+                RunnableCapture::Run
+            } else {
+                RunnableCapture::Named(name.to_string().into())
+            };
+            extra_captures.push(kind);
+        }
+
+        grammar.runnable_config = Some(RunnableConfig {
+            extra_captures,
+            query,
+        });
+
         Ok(self)
     }
 
@@ -1118,7 +1174,7 @@ impl Language {
                 for setting in query.property_settings(ix) {
                     match setting.key.as_ref() {
                         "language" => {
-                            config.language = setting.value.clone();
+                            config.language.clone_from(&setting.value);
                         }
                         "combined" => {
                             config.combined = true;
@@ -1315,12 +1371,15 @@ impl Language {
         }
     }
 
-    pub fn prettier_parser_name(&self) -> Option<&str> {
-        self.config.prettier_parser_name.as_deref()
+    pub fn lsp_id(&self) -> String {
+        match self.config.name.as_ref() {
+            "Plain Text" => "plaintext".to_string(),
+            language_name => language_name.to_lowercase(),
+        }
     }
 
-    pub fn prettier_plugins(&self) -> &Vec<Arc<str>> {
-        &self.config.prettier_plugins
+    pub fn prettier_parser_name(&self) -> Option<&str> {
+        self.config.prettier_parser_name.as_deref()
     }
 }
 
@@ -1331,11 +1390,12 @@ impl LanguageScope {
 
     /// Returns line prefix that is inserted in e.g. line continuations or
     /// in `toggle comments` action.
-    pub fn line_comment_prefixes(&self) -> Option<&Vec<Arc<str>>> {
+    pub fn line_comment_prefixes(&self) -> &[Arc<str>] {
         Override::as_option(
             self.config_override().map(|o| &o.line_comments),
             Some(&self.language.config.line_comments),
         )
+        .map_or(&[] as &[_], |e| e.as_slice())
     }
 
     pub fn block_comment_delimiters(&self) -> Option<(&Arc<str>, &Arc<str>)> {
@@ -1436,8 +1496,7 @@ impl Grammar {
     }
 
     fn parse_text(&self, text: &Rope, old_tree: Option<Tree>) -> Tree {
-        PARSER.with(|parser| {
-            let mut parser = parser.borrow_mut();
+        with_parser(|parser| {
             parser
                 .set_language(&self.ts_language)
                 .expect("incompatible grammar");
@@ -1480,6 +1539,15 @@ impl CodeLabel {
             }
         }
         result
+    }
+
+    pub fn push_str(&mut self, text: &str, highlight: Option<HighlightId>) {
+        let start_ix = self.text.len();
+        self.text.push_str(text);
+        let end_ix = self.text.len();
+        if let Some(highlight) = highlight {
+            self.runs.push((start_ix..end_ix, highlight));
+        }
     }
 }
 

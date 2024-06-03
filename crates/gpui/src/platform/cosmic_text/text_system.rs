@@ -90,7 +90,7 @@ impl PlatformTextSystem for CosmicTextSystem {
         let candidates = if let Some(font_ids) = state.font_ids_by_family_cache.get(&font.family) {
             font_ids.as_slice()
         } else {
-            let font_ids = state.load_family(&font.family, font.features)?;
+            let font_ids = state.load_family(&font.family, &font.features)?;
             state
                 .font_ids_by_family_cache
                 .insert(font.family.clone(), font_ids);
@@ -176,17 +176,6 @@ impl PlatformTextSystem for CosmicTextSystem {
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
         self.0.write().layout_line(text, font_size, runs)
     }
-
-    // todo(linux) Confirm that this has been superseded by the LineWrapper
-    fn wrap_line(
-        &self,
-        _text: &str,
-        _font_id: FontId,
-        _font_size: Pixels,
-        _width: Pixels,
-    ) -> Vec<usize> {
-        unimplemented!()
-    }
 }
 
 impl CosmicTextSystemState {
@@ -211,7 +200,7 @@ impl CosmicTextSystemState {
     fn load_family(
         &mut self,
         name: &str,
-        _features: FontFeatures,
+        _features: &FontFeatures,
     ) -> Result<SmallVec<[FontId; 4]>> {
         // TODO: Determine the proper system UI font.
         let name = if name == ".SystemUIFont" {
@@ -325,7 +314,7 @@ impl CosmicTextSystemState {
             let bitmap_size = glyph_bounds.size;
             let font = &self.loaded_fonts_store[params.font_id.0];
             let font_system = &mut self.font_system;
-            let image = self
+            let mut image = self
                 .swash_cache
                 .get_image(
                     font_system,
@@ -340,6 +329,13 @@ impl CosmicTextSystemState {
                 )
                 .clone()
                 .unwrap();
+
+            if params.is_emoji {
+                // Convert from RGBA to BGRA.
+                for pixel in image.data.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+            }
 
             Ok((bitmap_size, image.data))
         }
@@ -405,13 +401,20 @@ impl CosmicTextSystemState {
         for glyph in &layout.glyphs {
             let font_id = glyph.font_id;
             let font_id = self.font_id_for_cosmic_id(font_id);
+            let is_emoji = self.is_emoji(font_id);
             let mut glyphs = SmallVec::new();
+
+            // HACK: Prevent crash caused by variation selectors.
+            if glyph.glyph_id == 3 && is_emoji {
+                continue;
+            }
+
             // todo(linux) this is definitely wrong, each glyph in glyphs from cosmic-text is a cluster with one glyph, ShapedRun takes a run of glyphs with the same font and direction
             glyphs.push(ShapedGlyph {
                 id: GlyphId(glyph.glyph_id as u32),
                 position: point((glyph.x).into(), glyph.y.into()),
                 index: glyph.start,
-                is_emoji: self.is_emoji(font_id),
+                is_emoji,
             });
 
             runs.push(crate::ShapedRun { font_id, glyphs });

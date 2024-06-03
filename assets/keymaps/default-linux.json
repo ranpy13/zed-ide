@@ -28,7 +28,6 @@
       "ctrl-0": "zed::ResetBufferFontSize",
       "ctrl-,": "zed::OpenSettings",
       "ctrl-q": "zed::Quit",
-      "alt-f9": "zed::Hide",
       "f11": "zed::ToggleFullScreen"
     }
   },
@@ -53,7 +52,9 @@
       // "alt-d": "editor::DeleteToNextWordEnd",
       "ctrl-x": "editor::Cut",
       "ctrl-c": "editor::Copy",
+      "ctrl-insert": "editor::Copy",
       "ctrl-v": "editor::Paste",
+      "shift-insert": "editor::Paste",
       "ctrl-z": "editor::Undo",
       "ctrl-shift-z": "editor::Redo",
       "up": "editor::MoveUp",
@@ -138,6 +139,8 @@
       "ctrl-alt-space": "editor::ShowCharacterPalette",
       "ctrl-;": "editor::ToggleLineNumbers",
       "ctrl-k ctrl-r": "editor::RevertSelectedHunks",
+      "ctrl-'": "editor::ToggleHunkDiff",
+      "ctrl-\"": "editor::ExpandAllHunkDiffs",
       "ctrl-alt-g b": "editor::ToggleGitBlame"
     }
   },
@@ -188,10 +191,17 @@
     }
   },
   {
+    "context": "Markdown",
+    "bindings": {
+      "ctrl-c": "markdown::Copy"
+    }
+  },
+  {
     "context": "AssistantPanel",
     "bindings": {
       "ctrl-g": "search::SelectNextMatch",
-      "ctrl-shift-g": "search::SelectPrevMatch"
+      "ctrl-shift-g": "search::SelectPrevMatch",
+      "alt-m": "assistant::ToggleModelSelector"
     }
   },
   {
@@ -201,7 +211,16 @@
       "ctrl-s": "workspace::Save",
       "ctrl->": "assistant::QuoteSelection",
       "shift-enter": "assistant::Split",
-      "ctrl-r": "assistant::CycleMessageRole"
+      "ctrl-r": "assistant::CycleMessageRole",
+      "enter": "assistant::ConfirmCommand",
+      "alt-enter": "editor::Newline"
+    }
+  },
+  {
+    "context": "PromptLibrary",
+    "bindings": {
+      "ctrl-n": "prompt_library::NewPrompt",
+      "ctrl-shift-s": "prompt_library::ToggleDefaultPrompt"
     }
   },
   {
@@ -297,13 +316,8 @@
       "ctrl-shift-k": "editor::DeleteLine",
       "alt-up": "editor::MoveLineUp",
       "alt-down": "editor::MoveLineDown",
-      "ctrl-alt-shift-up": [
-        "editor::DuplicateLine",
-        {
-          "move_upwards": true
-        }
-      ],
-      "ctrl-alt-shift-down": "editor::DuplicateLine",
+      "ctrl-alt-shift-up": "editor::DuplicateLineUp",
+      "ctrl-alt-shift-down": "editor::DuplicateLineDown",
       "ctrl-shift-left": "editor::SelectToPreviousWordStart",
       "ctrl-shift-right": "editor::SelectToNextWordEnd",
       "ctrl-shift-up": "editor::SelectLargerSyntaxNode", //todo(linux) tmp keybinding
@@ -497,6 +511,12 @@
     }
   },
   {
+    "context": "Editor && inline_completion && !showing_completions",
+    "bindings": {
+      "tab": "editor::AcceptInlineCompletion"
+    }
+  },
+  {
     "context": "Editor && showing_code_actions",
     "bindings": {
       "enter": "editor::ConfirmCodeAction"
@@ -527,6 +547,7 @@
     "context": "Editor && mode == full",
     "bindings": {
       "alt-enter": "editor::OpenExcerpts",
+      "shift-enter": "editor::ExpandExcerpts",
       "ctrl-k enter": "editor::OpenExcerptsSplit",
       "ctrl-f8": "editor::GoToHunk",
       "ctrl-shift-f8": "editor::GoToPrevHunk",
@@ -548,15 +569,17 @@
       "alt-ctrl-n": "project_panel::NewDirectory",
       "ctrl-x": "project_panel::Cut",
       "ctrl-c": "project_panel::Copy",
+      "ctrl-insert": "project_panel::Copy",
       "ctrl-v": "project_panel::Paste",
+      "shift-insert": "project_panel::Paste",
       "ctrl-alt-c": "project_panel::CopyPath",
       "alt-ctrl-shift-c": "project_panel::CopyRelativePath",
       "f2": "project_panel::Rename",
       "enter": "project_panel::Rename",
-      "backspace": "project_panel::Delete",
-      "delete": "project_panel::Delete",
-      "ctrl-backspace": ["project_panel::Delete", { "skip_prompt": true }],
-      "ctrl-delete": ["project_panel::Delete", { "skip_prompt": true }],
+      "backspace": "project_panel::Trash",
+      "delete": "project_panel::Trash",
+      "ctrl-backspace": ["project_panel::Delete", { "skip_prompt": false }],
+      "ctrl-delete": ["project_panel::Delete", { "skip_prompt": false }],
       "alt-ctrl-r": "project_panel::RevealInFinder",
       "alt-shift-f": "project_panel::NewSearchInDirectory"
     }
@@ -593,12 +616,6 @@
     }
   },
   {
-    "context": "ChatPanel > MessageEditor",
-    "bindings": {
-      "escape": "chat_panel::CloseReplyPreview"
-    }
-  },
-  {
     "context": "FileFinder",
     "bindings": { "ctrl-shift-p": "file_finder::SelectPrev" }
   },
@@ -616,7 +633,9 @@
     "bindings": {
       "ctrl-alt-space": "terminal::ShowCharacterPalette",
       "shift-ctrl-c": "terminal::Copy",
+      "ctrl-insert": "terminal::Copy",
       "shift-ctrl-v": "terminal::Paste",
+      "shift-insert": "terminal::Paste",
       "up": ["terminal::SendKeystroke", "up"],
       "pageup": ["terminal::SendKeystroke", "pageup"],
       "down": ["terminal::SendKeystroke", "down"],

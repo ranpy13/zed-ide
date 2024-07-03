@@ -191,7 +191,6 @@ impl NotificationStore {
     async fn handle_new_notification(
         this: Model<Self>,
         envelope: TypedEnvelope<proto::AddNotification>,
-        _: Arc<Client>,
         cx: AsyncAppContext,
     ) -> Result<()> {
         this.add_notifications(
@@ -208,7 +207,6 @@ impl NotificationStore {
     async fn handle_delete_notification(
         this: Model<Self>,
         envelope: TypedEnvelope<proto::DeleteNotification>,
-        _: Arc<Client>,
         mut cx: AsyncAppContext,
     ) -> Result<()> {
         this.splice_notifications([(envelope.payload.notification_id, None)], false, &mut cx);
@@ -218,7 +216,6 @@ impl NotificationStore {
     async fn handle_update_notification(
         this: Model<Self>,
         envelope: TypedEnvelope<proto::UpdateNotification>,
-        _: Arc<Client>,
         mut cx: AsyncAppContext,
     ) -> Result<()> {
         if let Some(notification) = envelope.payload.notification {

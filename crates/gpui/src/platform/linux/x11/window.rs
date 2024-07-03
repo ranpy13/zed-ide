@@ -1,14 +1,16 @@
+use anyhow::Context;
+
 use crate::{
     platform::blade::{BladeRenderer, BladeSurfaceConfig},
-    size, AnyWindowHandle, Bounds, DevicePixels, ForegroundExecutor, Modifiers, Pixels,
+    px, size, AnyWindowHandle, Bounds, DevicePixels, ForegroundExecutor, Modifiers, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PromptLevel, Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowParams, X11ClientStatePtr,
+    WindowKind, WindowParams, X11ClientStatePtr,
 };
 
 use blade_graphics as gpu;
 use raw_window_handle as rwh;
-use util::ResultExt;
+use util::{maybe, ResultExt};
 use x11rb::{
     connection::Connection,
     protocol::{
@@ -32,7 +34,6 @@ use std::{
 };
 
 use super::{X11Display, XINPUT_MASTER_DEVICE};
-
 x11rb::atom_manager! {
     pub XcbAtoms: AtomsCookie {
         UTF8_STRING,
@@ -46,7 +47,10 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
+        _NET_ACTIVE_WINDOW,
         _NET_WM_MOVERESIZE,
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_NOTIFICATION,
         _GTK_SHOW_WINDOW_MENU,
     }
 }
@@ -154,12 +158,13 @@ pub struct Callbacks {
 }
 
 pub struct X11WindowState {
+    pub destroyed: bool,
     client: X11ClientStatePtr,
     executor: ForegroundExecutor,
     atoms: XcbAtoms,
     x_root_window: xproto::Window,
     _raw: RawWindow,
-    bounds: Bounds<i32>,
+    bounds: Bounds<Pixels>,
     scale_factor: f32,
     renderer: BladeRenderer,
     display: Rc<dyn PlatformDisplay>,
@@ -216,7 +221,7 @@ impl X11WindowState {
         atoms: &XcbAtoms,
         scale_factor: f32,
         appearance: WindowAppearance,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let x_screen_index = params
             .display_id
             .map_or(x_main_screen_index, |did| did.0 as usize);
@@ -248,13 +253,11 @@ impl X11WindowState {
             xcb_connection
                 .create_colormap(xproto::ColormapAlloc::NONE, id, visual_set.root, visual.id)
                 .unwrap()
-                .check()
-                .unwrap();
+                .check()?;
             id
         };
 
         let win_aux = xproto::CreateWindowAux::new()
-            .background_pixel(x11rb::NONE)
             // https://stackoverflow.com/questions/43218127/x11-xlib-xcb-creating-a-window-requires-border-pixel-if-specifying-colormap-wh
             .border_pixel(visual_set.black_pixel)
             .colormap(colormap)
@@ -266,24 +269,52 @@ impl X11WindowState {
                     | xproto::EventMask::KEY_RELEASE,
             );
 
+        let mut bounds = params.bounds.to_device_pixels(scale_factor);
+        if bounds.size.width.0 == 0 || bounds.size.height.0 == 0 {
+            log::warn!("Window bounds contain a zero value. height={}, width={}. Falling back to defaults.", bounds.size.height.0, bounds.size.width.0);
+            bounds.size.width = 800.into();
+            bounds.size.height = 600.into();
+        }
+
         xcb_connection
             .create_window(
                 visual.depth,
                 x_window,
                 visual_set.root,
-                params.bounds.origin.x.0 as i16,
-                params.bounds.origin.y.0 as i16,
-                params.bounds.size.width.0 as u16,
-                params.bounds.size.height.0 as u16,
+                (bounds.origin.x.0 + 2) as i16,
+                bounds.origin.y.0 as i16,
+                bounds.size.width.0 as u16,
+                bounds.size.height.0 as u16,
                 0,
                 xproto::WindowClass::INPUT_OUTPUT,
                 visual.id,
                 &win_aux,
             )
             .unwrap()
-            .check()
-            .unwrap();
+            .check().with_context(|| {
+                format!("CreateWindow request to X server failed. depth: {}, x_window: {}, visual_set.root: {}, bounds.origin.x.0: {}, bounds.origin.y.0: {}, bounds.size.width.0: {}, bounds.size.height.0: {}",
+                    visual.depth, x_window, visual_set.root, bounds.origin.x.0 + 2, bounds.origin.y.0, bounds.size.width.0, bounds.size.height.0)
+            })?;
 
+        let reply = xcb_connection
+            .get_geometry(x_window)
+            .unwrap()
+            .reply()
+            .unwrap();
+        if reply.x == 0 && reply.y == 0 {
+            bounds.origin.x.0 += 2;
+            // Work around a bug where our rendered content appears
+            // outside the window bounds when opened at the default position
+            // (14px, 49px on X + Gnome + Ubuntu 22).
+            xcb_connection
+                .configure_window(
+                    x_window,
+                    &xproto::ConfigureWindowAux::new()
+                        .x(bounds.origin.x.0)
+                        .y(bounds.origin.y.0),
+                )
+                .unwrap();
+        }
         if let Some(titlebar) = params.titlebar {
             if let Some(title) = titlebar.title {
                 xcb_connection
@@ -296,6 +327,17 @@ impl X11WindowState {
                     )
                     .unwrap();
             }
+        }
+        if params.kind == WindowKind::PopUp {
+            xcb_connection
+                .change_property32(
+                    xproto::PropMode::REPLACE,
+                    x_window,
+                    atoms._NET_WM_WINDOW_TYPE,
+                    xproto::AtomEnum::ATOM,
+                    &[atoms._NET_WM_WINDOW_TYPE_NOTIFICATION],
+                )
+                .unwrap();
         }
 
         xcb_connection
@@ -323,7 +365,6 @@ impl X11WindowState {
             )
             .unwrap();
 
-        xcb_connection.map_window(x_window).unwrap();
         xcb_connection.flush().unwrap();
 
         let raw = RawWindow {
@@ -345,7 +386,7 @@ impl X11WindowState {
                     },
                 )
             }
-            .unwrap(),
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?,
         );
 
         let config = BladeSurfaceConfig {
@@ -354,21 +395,25 @@ impl X11WindowState {
             size: query_render_extent(xcb_connection, x_window),
             transparent: params.window_background != WindowBackgroundAppearance::Opaque,
         };
+        xcb_connection.map_window(x_window).unwrap();
 
-        Self {
+        Ok(Self {
             client,
             executor,
-            display: Rc::new(X11Display::new(xcb_connection, x_screen_index).unwrap()),
+            display: Rc::new(
+                X11Display::new(xcb_connection, scale_factor, x_screen_index).unwrap(),
+            ),
             _raw: raw,
             x_root_window: visual_set.root,
-            bounds: params.bounds.map(|v| v.0),
+            bounds: bounds.to_pixels(scale_factor),
             scale_factor,
             renderer: BladeRenderer::new(gpu, config),
             atoms: *atoms,
             input_handler: None,
             appearance,
             handle,
-        }
+            destroyed: false,
+        })
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -387,22 +432,32 @@ impl Drop for X11Window {
         let mut state = self.0.state.borrow_mut();
         state.renderer.destroy();
 
-        self.0.xcb_connection.unmap_window(self.0.x_window).unwrap();
-        self.0
-            .xcb_connection
-            .destroy_window(self.0.x_window)
-            .unwrap();
-        self.0.xcb_connection.flush().unwrap();
+        let destroy_x_window = maybe!({
+            self.0.xcb_connection.unmap_window(self.0.x_window)?;
+            self.0.xcb_connection.destroy_window(self.0.x_window)?;
+            self.0.xcb_connection.flush()?;
 
-        let this_ptr = self.0.clone();
-        let client_ptr = state.client.clone();
-        state
-            .executor
-            .spawn(async move {
-                this_ptr.close();
-                client_ptr.drop_window(this_ptr.x_window);
-            })
-            .detach();
+            anyhow::Ok(())
+        })
+        .context("unmapping and destroying X11 window")
+        .log_err();
+
+        if destroy_x_window.is_some() {
+            // Mark window as destroyed so that we can filter out when X11 events
+            // for it still come in.
+            state.destroyed = true;
+
+            let this_ptr = self.0.clone();
+            let client_ptr = state.client.clone();
+            state
+                .executor
+                .spawn(async move {
+                    this_ptr.close();
+                    client_ptr.drop_window(this_ptr.x_window);
+                })
+                .detach();
+        }
+
         drop(state);
     }
 }
@@ -426,8 +481,8 @@ impl X11Window {
         atoms: &XcbAtoms,
         scale_factor: f32,
         appearance: WindowAppearance,
-    ) -> Self {
-        Self(X11WindowStatePtr {
+    ) -> anyhow::Result<Self> {
+        Ok(Self(X11WindowStatePtr {
             state: Rc::new(RefCell::new(X11WindowState::new(
                 handle,
                 client,
@@ -439,11 +494,11 @@ impl X11Window {
                 atoms,
                 scale_factor,
                 appearance,
-            ))),
+            )?)),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
             xcb_connection: xcb_connection.clone(),
             x_window,
-        })
+        }))
     }
 
     fn set_wm_hints(&self, wm_hint_property_state: WmHintPropertyState, prop1: u32, prop2: u32) {
@@ -610,6 +665,7 @@ impl X11WindowStatePtr {
         let is_resize;
         {
             let mut state = self.state.borrow_mut();
+            let bounds = bounds.map(|f| px(f as f32 / state.scale_factor));
 
             is_resize = bounds.size.width != state.bounds.size.width
                 || bounds.size.height != state.bounds.size.height;
@@ -623,10 +679,11 @@ impl X11WindowStatePtr {
             }
 
             let gpu_size = query_render_extent(&self.xcb_connection, self.x_window);
-            if state.renderer.viewport_size() != gpu_size {
-                state
-                    .renderer
-                    .update_drawable_size(size(gpu_size.width as f64, gpu_size.height as f64));
+            if true {
+                state.renderer.update_drawable_size(size(
+                    DevicePixels(gpu_size.width as i32),
+                    DevicePixels(gpu_size.height as i32),
+                ));
                 resize_args = Some((state.content_size(), state.scale_factor));
             }
         }
@@ -661,8 +718,8 @@ impl X11WindowStatePtr {
 }
 
 impl PlatformWindow for X11Window {
-    fn bounds(&self) -> Bounds<DevicePixels> {
-        self.0.state.borrow().bounds.map(|v| v.into())
+    fn bounds(&self) -> Bounds<Pixels> {
+        self.0.state.borrow().bounds
     }
 
     fn is_maximized(&self) -> bool {
@@ -676,7 +733,11 @@ impl PlatformWindow for X11Window {
 
     fn window_bounds(&self) -> WindowBounds {
         let state = self.0.state.borrow();
-        WindowBounds::Windowed(state.bounds.map(|p| DevicePixels(p)))
+        if self.is_maximized() {
+            WindowBounds::Maximized(state.bounds)
+        } else {
+            WindowBounds::Windowed(state.bounds)
+        }
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -741,10 +802,29 @@ impl PlatformWindow for X11Window {
     }
 
     fn activate(&self) {
-        let win_aux = xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE);
+        let data = [1, xproto::Time::CURRENT_TIME.into(), 0, 0, 0];
+        let message = xproto::ClientMessageEvent::new(
+            32,
+            self.0.x_window,
+            self.0.state.borrow().atoms._NET_ACTIVE_WINDOW,
+            data,
+        );
         self.0
             .xcb_connection
-            .configure_window(self.0.x_window, &win_aux)
+            .send_event(
+                false,
+                self.0.state.borrow().x_root_window,
+                xproto::EventMask::SUBSTRUCTURE_REDIRECT | xproto::EventMask::SUBSTRUCTURE_NOTIFY,
+                message,
+            )
+            .log_err();
+        self.0
+            .xcb_connection
+            .set_input_focus(
+                xproto::InputFocus::POINTER_ROOT,
+                self.0.x_window,
+                xproto::Time::CURRENT_TIME,
+            )
             .log_err();
     }
 

@@ -44,7 +44,13 @@ pub fn init(cx: &mut AppContext) {
             workspace.register_action(TerminalPanel::new_terminal);
             workspace.register_action(TerminalPanel::open_terminal);
             workspace.register_action(|workspace, _: &ToggleFocus, cx| {
-                workspace.toggle_panel_focus::<TerminalPanel>(cx);
+                if workspace
+                    .panel::<TerminalPanel>(cx)
+                    .as_ref()
+                    .is_some_and(|panel| panel.read(cx).enabled)
+                {
+                    workspace.toggle_panel_focus::<TerminalPanel>(cx);
+                }
             });
         },
     )
@@ -61,6 +67,7 @@ pub struct TerminalPanel {
     pending_terminals_to_add: usize,
     _subscriptions: Vec<Subscription>,
     deferred_tasks: HashMap<TaskId, Task<()>>,
+    enabled: bool,
 }
 
 impl TerminalPanel {
@@ -190,6 +197,8 @@ impl TerminalPanel {
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe(&pane, Self::handle_pane_event),
         ];
+        let project = workspace.project().read(cx);
+        let enabled = project.is_local() || project.supports_remote_terminal(cx);
         let this = Self {
             pane,
             fs: workspace.app_state().fs.clone(),
@@ -200,6 +209,7 @@ impl TerminalPanel {
             pending_terminals_to_add: 0,
             deferred_tasks: HashMap::default(),
             _subscriptions: subscriptions,
+            enabled,
         };
         this
     }
@@ -361,7 +371,6 @@ impl TerminalPanel {
         spawn_task.args = user_args;
         let spawn_task = spawn_task;
 
-        let reveal = spawn_task.reveal;
         let allow_concurrent_runs = spawn_in_terminal.allow_concurrent_runs;
         let use_new_terminal = spawn_in_terminal.use_new_terminal;
 
@@ -410,20 +419,6 @@ impl TerminalPanel {
                         .ok();
                 }),
             );
-
-            match reveal {
-                RevealStrategy::Always => {
-                    self.activate_terminal_view(existing_item_index, cx);
-                    let task_workspace = self.workspace.clone();
-                    cx.spawn(|_, mut cx| async move {
-                        task_workspace
-                            .update(&mut cx, |workspace, cx| workspace.focus_panel::<Self>(cx))
-                            .ok()
-                    })
-                    .detach();
-                }
-                RevealStrategy::Never => {}
-            }
         }
     }
 
@@ -487,6 +482,19 @@ impl TerminalPanel {
         reveal_strategy: RevealStrategy,
         cx: &mut ViewContext<Self>,
     ) -> Task<Result<Model<Terminal>>> {
+        if !self.enabled {
+            if spawn_task.is_none()
+                || !matches!(
+                    spawn_task.as_ref().unwrap().cwd,
+                    Some(TerminalWorkDir::Ssh { .. })
+                )
+            {
+                return Task::ready(Err(anyhow::anyhow!(
+                    "terminal not yet supported for remote projects"
+                )));
+            }
+        }
+
         let workspace = self.workspace.clone();
         self.pending_terminals_to_add += 1;
 
@@ -619,7 +627,7 @@ impl TerminalPanel {
         &self.pane
     }
 
-    fn has_no_terminals(&mut self, cx: &mut ViewContext<'_, Self>) -> bool {
+    fn has_no_terminals(&self, cx: &WindowContext) -> bool {
         self.pane.read(cx).items_len() == 0 && self.pending_terminals_to_add == 0
     }
 }
@@ -754,9 +762,11 @@ impl Panel for TerminalPanel {
     }
 
     fn icon(&self, cx: &WindowContext) -> Option<IconName> {
-        TerminalSettings::get_global(cx)
-            .button
-            .then(|| IconName::Terminal)
+        if (self.enabled || !self.has_no_terminals(cx)) && TerminalSettings::get_global(cx).button {
+            Some(IconName::Terminal)
+        } else {
+            None
+        }
     }
 
     fn icon_tooltip(&self, _cx: &WindowContext) -> Option<&'static str> {

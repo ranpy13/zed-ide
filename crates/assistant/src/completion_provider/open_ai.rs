@@ -1,4 +1,5 @@
-use crate::assistant_settings::ZedDotDevModel;
+use crate::assistant_settings::CloudModel;
+use crate::assistant_settings::{AssistantProvider, AssistantSettings};
 use crate::{
     assistant_settings::OpenAiModel, CompletionProvider, LanguageModel, LanguageModelRequest, Role,
 };
@@ -56,8 +57,26 @@ impl OpenAiCompletionProvider {
         self.settings_version = settings_version;
     }
 
-    pub fn available_models(&self) -> impl Iterator<Item = OpenAiModel> {
-        OpenAiModel::iter()
+    pub fn available_models(&self, cx: &AppContext) -> impl Iterator<Item = OpenAiModel> {
+        if let AssistantProvider::OpenAi {
+            available_models, ..
+        } = &AssistantSettings::get_global(cx).provider
+        {
+            if !available_models.is_empty() {
+                // available_models is set, just return it
+                return available_models.clone().into_iter();
+            }
+        }
+        let available_models = if matches!(self.model, OpenAiModel::Custom { .. }) {
+            // available_models is not set but the default model is set to custom, only show custom
+            vec![self.model.clone()]
+        } else {
+            // default case, use all models except custom
+            OpenAiModel::iter()
+                .filter(|model| !matches!(model, OpenAiModel::Custom { .. }))
+                .collect()
+        };
+        available_models.into_iter()
     }
 
     pub fn settings_version(&self) -> usize {
@@ -210,9 +229,11 @@ pub fn count_open_ai_tokens(
 
             match request.model {
                 LanguageModel::Anthropic(_)
-                | LanguageModel::ZedDotDev(ZedDotDevModel::Claude3Opus)
-                | LanguageModel::ZedDotDev(ZedDotDevModel::Claude3Sonnet)
-                | LanguageModel::ZedDotDev(ZedDotDevModel::Claude3Haiku) => {
+                | LanguageModel::Cloud(CloudModel::Claude3_5Sonnet)
+                | LanguageModel::Cloud(CloudModel::Claude3Opus)
+                | LanguageModel::Cloud(CloudModel::Claude3Sonnet)
+                | LanguageModel::Cloud(CloudModel::Claude3Haiku)
+                | LanguageModel::OpenAi(OpenAiModel::Custom { .. }) => {
                     // Tiktoken doesn't yet support these models, so we manually use the
                     // same tokenizer as GPT-4.
                     tiktoken_rs::num_tokens_from_messages("gpt-4", &messages)
@@ -336,7 +357,7 @@ impl Render for AuthenticationPrompt {
                 h_flex()
                     .gap_2()
                     .child(Label::new("Click on").size(LabelSize::Small))
-                    .child(Icon::new(IconName::Ai).size(IconSize::XSmall))
+                    .child(Icon::new(IconName::ZedAssistant).size(IconSize::XSmall))
                     .child(
                         Label::new("in the status bar to close this panel.").size(LabelSize::Small),
                     ),

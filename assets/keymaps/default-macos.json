@@ -61,13 +61,17 @@
       "cmd-shift-z": "editor::Redo",
       "up": "editor::MoveUp",
       "ctrl-up": "editor::MoveToStartOfParagraph",
-      "pageup": "editor::PageUp",
-      "shift-pageup": "editor::MovePageUp",
+      "pageup": "editor::MovePageUp",
+      "shift-pageup": "editor::SelectPageUp",
+      "cmd-pageup": "editor::PageUp",
+      "ctrl-pageup": "editor::LineUp",
       "home": "editor::MoveToBeginningOfLine",
       "down": "editor::MoveDown",
       "ctrl-down": "editor::MoveToEndOfParagraph",
-      "pagedown": "editor::PageDown",
-      "shift-pagedown": "editor::MovePageDown",
+      "pagedown": "editor::MovePageDown",
+      "shift-pagedown": "editor::SelectPageDown",
+      "cmd-pagedown": "editor::PageDown",
+      "ctrl-pagedown": "editor::LineDown",
       "end": "editor::MoveToEndOfLine",
       "left": "editor::MoveLeft",
       "right": "editor::MoveRight",
@@ -176,13 +180,21 @@
           "replace_enabled": true
         }
       ],
+      "cmd-alt-l": [
+        "buffer_search::Deploy",
+        {
+          "selection_search_enabled": true
+        }
+      ],
       "cmd-e": [
         "buffer_search::Deploy",
         {
           "focus": false
         }
       ],
-      "cmd->": "assistant::QuoteSelection"
+      "cmd->": "assistant::QuoteSelection",
+      "cmd-<": "assistant::InsertIntoEditor",
+      "cmd-alt-e": "editor::SelectEnclosingSymbol"
     }
   },
   {
@@ -222,11 +234,12 @@
     }
   },
   {
-    "context": "ConversationEditor > Editor",
+    "context": "ContextEditor > Editor",
     "bindings": {
       "cmd-enter": "assistant::Assist",
       "cmd-s": "workspace::Save",
       "cmd->": "assistant::QuoteSelection",
+      "cmd-<": "assistant::InsertIntoEditor",
       "shift-enter": "assistant::Split",
       "ctrl-r": "assistant::CycleMessageRole",
       "enter": "assistant::ConfirmCommand",
@@ -250,7 +263,8 @@
       "shift-enter": "search::SelectPrevMatch",
       "alt-enter": "search::SelectAllMatches",
       "cmd-f": "search::FocusSearch",
-      "cmd-alt-f": "search::ToggleReplace"
+      "cmd-alt-f": "search::ToggleReplace",
+      "cmd-alt-l": "search::ToggleSelection"
     }
   },
   {
@@ -316,6 +330,7 @@
       "cmd-g": "search::SelectNextMatch",
       "cmd-shift-g": "search::SelectPrevMatch",
       "cmd-shift-h": "search::ToggleReplace",
+      "cmd-alt-l": "search::ToggleSelection",
       "alt-enter": "search::SelectAllMatches",
       "alt-cmd-c": "search::ToggleCaseSensitive",
       "alt-cmd-w": "search::ToggleWholeWord",
@@ -467,6 +482,7 @@
       "cmd-shift-p": "command_palette::Toggle",
       "cmd-shift-m": "diagnostics::Deploy",
       "cmd-shift-e": "project_panel::ToggleFocus",
+      "cmd-shift-b": "outline_panel::ToggleFocus",
       "cmd-?": "assistant::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k m": "language_selector::Toggle",
@@ -577,11 +593,25 @@
     }
   },
   {
+    "context": "OutlinePanel",
+    "bindings": {
+      "left": "outline_panel::CollapseSelectedEntry",
+      "right": "outline_panel::ExpandSelectedEntry",
+      "cmd-alt-c": "outline_panel::CopyPath",
+      "alt-cmd-shift-c": "outline_panel::CopyRelativePath",
+      "alt-cmd-r": "outline_panel::RevealInFinder",
+      "space": "outline_panel::Open",
+      "shift-down": "menu::SelectNext",
+      "shift-up": "menu::SelectPrev"
+    }
+  },
+  {
     "context": "ProjectPanel",
     "bindings": {
       "left": "project_panel::CollapseSelectedEntry",
       "right": "project_panel::ExpandSelectedEntry",
       "cmd-n": "project_panel::NewFile",
+      "cmd-d": "project_panel::Duplicate",
       "alt-cmd-n": "project_panel::NewDirectory",
       "cmd-x": "project_panel::Cut",
       "cmd-c": "project_panel::Copy",
@@ -591,8 +621,9 @@
       "enter": "project_panel::Rename",
       "backspace": ["project_panel::Trash", { "skip_prompt": false }],
       "delete": ["project_panel::Trash", { "skip_prompt": false }],
-      "cmd-backspace": ["project_panel::Delete", { "skip_prompt": false }],
+      "cmd-backspace": ["project_panel::Trash", { "skip_prompt": true }],
       "cmd-delete": ["project_panel::Delete", { "skip_prompt": false }],
+      "cmd-alt-backspace": ["project_panel::Delete", { "skip_prompt": false }],
       "alt-cmd-r": "project_panel::RevealInFinder",
       "alt-shift-f": "project_panel::NewSearchInDirectory",
       "shift-down": "menu::SelectNext",
@@ -659,6 +690,7 @@
       "cmd-c": "terminal::Copy",
       "cmd-v": "terminal::Paste",
       "cmd-k": "terminal::Clear",
+      "ctrl-enter": "assistant::InlineAssist",
       // Some nice conveniences
       "cmd-backspace": ["terminal::SendText", "\u0015"],
       "cmd-right": ["terminal::SendText", "\u0005"],
@@ -674,7 +706,13 @@
       "pagedown": ["terminal::SendKeystroke", "pagedown"],
       "escape": ["terminal::SendKeystroke", "escape"],
       "enter": ["terminal::SendKeystroke", "enter"],
-      "ctrl-c": ["terminal::SendKeystroke", "ctrl-c"]
+      "ctrl-c": ["terminal::SendKeystroke", "ctrl-c"],
+      "shift-pageup": "terminal::ScrollPageUp",
+      "shift-pagedown": "terminal::ScrollPageDown",
+      "shift-up": "terminal::ScrollLineUp",
+      "shift-down": "terminal::ScrollLineDown",
+      "shift-home": "terminal::ScrollToTop",
+      "shift-end": "terminal::ScrollToBottom"
     }
   }
 ]

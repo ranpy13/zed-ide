@@ -1,38 +1,40 @@
 pub mod assistant_panel;
 pub mod assistant_settings;
-mod codegen;
 mod completion_provider;
+mod context_store;
+mod inline_assistant;
 mod model_selector;
 mod prompt_library;
 mod prompts;
-mod saved_conversation;
 mod search;
 mod slash_command;
 mod streaming_diff;
+mod terminal_inline_assistant;
 
-pub use assistant_panel::AssistantPanel;
-
-use assistant_settings::{AnthropicModel, AssistantSettings, OpenAiModel, ZedDotDevModel};
+pub use assistant_panel::{AssistantPanel, AssistantPanelEvent};
+use assistant_settings::{AnthropicModel, AssistantSettings, CloudModel, OllamaModel, OpenAiModel};
 use assistant_slash_command::SlashCommandRegistry;
 use client::{proto, Client};
 use command_palette_hooks::CommandPaletteFilter;
 pub(crate) use completion_provider::*;
+pub(crate) use context_store::*;
+use fs::Fs;
 use gpui::{actions, AppContext, Global, SharedString, UpdateGlobal};
+use indexed_docs::IndexedDocsRegistry;
+pub(crate) use inline_assistant::*;
 pub(crate) use model_selector::*;
-use prompt_library::PromptStore;
-pub(crate) use saved_conversation::*;
 use semantic_index::{CloudEmbeddingProvider, SemanticIndex};
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use slash_command::{
-    active_command, file_command, project_command, prompt_command, rustdoc_command, search_command,
-    tabs_command,
+    active_command, default_command, diagnostics_command, fetch_command, file_command, now_command,
+    project_command, prompt_command, rustdoc_command, search_command, tabs_command, term_command,
 };
 use std::{
     fmt::{self, Display},
     sync::Arc,
 };
-use util::paths::EMBEDDINGS_DIR;
+pub(crate) use streaming_diff::*;
 
 actions!(
     assistant,
@@ -41,6 +43,7 @@ actions!(
         Split,
         CycleMessageRole,
         QuoteSelection,
+        InsertIntoEditor,
         ToggleFocus,
         ResetKey,
         InlineAssist,
@@ -87,14 +90,15 @@ impl Display for Role {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum LanguageModel {
-    ZedDotDev(ZedDotDevModel),
+    Cloud(CloudModel),
     OpenAi(OpenAiModel),
     Anthropic(AnthropicModel),
+    Ollama(OllamaModel),
 }
 
 impl Default for LanguageModel {
     fn default() -> Self {
-        LanguageModel::ZedDotDev(ZedDotDevModel::default())
+        LanguageModel::Cloud(CloudModel::default())
     }
 }
 
@@ -103,7 +107,8 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => format!("openai/{}", model.id()),
             LanguageModel::Anthropic(model) => format!("anthropic/{}", model.id()),
-            LanguageModel::ZedDotDev(model) => format!("zed.dev/{}", model.id()),
+            LanguageModel::Cloud(model) => format!("zed.dev/{}", model.id()),
+            LanguageModel::Ollama(model) => format!("ollama/{}", model.id()),
         }
     }
 
@@ -111,7 +116,8 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => model.display_name().into(),
             LanguageModel::Anthropic(model) => model.display_name().into(),
-            LanguageModel::ZedDotDev(model) => model.display_name().into(),
+            LanguageModel::Cloud(model) => model.display_name().into(),
+            LanguageModel::Ollama(model) => model.display_name().into(),
         }
     }
 
@@ -119,7 +125,8 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => model.max_token_count(),
             LanguageModel::Anthropic(model) => model.max_token_count(),
-            LanguageModel::ZedDotDev(model) => model.max_token_count(),
+            LanguageModel::Cloud(model) => model.max_token_count(),
+            LanguageModel::Ollama(model) => model.max_token_count(),
         }
     }
 
@@ -127,7 +134,8 @@ impl LanguageModel {
         match self {
             LanguageModel::OpenAi(model) => model.id(),
             LanguageModel::Anthropic(model) => model.id(),
-            LanguageModel::ZedDotDev(model) => model.id(),
+            LanguageModel::Cloud(model) => model.id(),
+            LanguageModel::Ollama(model) => model.id(),
         }
     }
 }
@@ -170,6 +178,24 @@ impl LanguageModelRequest {
             temperature: self.temperature,
             tool_choice: None,
             tools: Vec::new(),
+        }
+    }
+
+    /// Before we send the request to the server, we can perform fixups on it appropriate to the model.
+    pub fn preprocess(&mut self) {
+        match &self.model {
+            LanguageModel::OpenAi(_) => {}
+            LanguageModel::Anthropic(_) => {}
+            LanguageModel::Ollama(_) => {}
+            LanguageModel::Cloud(model) => match model {
+                CloudModel::Claude3Opus
+                | CloudModel::Claude3Sonnet
+                | CloudModel::Claude3Haiku
+                | CloudModel::Claude3_5Sonnet => {
+                    preprocess_anthropic_request(self);
+                }
+                _ => {}
+            },
         }
     }
 }
@@ -240,7 +266,7 @@ impl Assistant {
     }
 }
 
-pub fn init(client: Arc<Client>, cx: &mut AppContext) {
+pub fn init(fs: Arc<dyn Fs>, client: Arc<Client>, cx: &mut AppContext) {
     cx.set_global(Assistant::default());
     AssistantSettings::register(cx);
 
@@ -249,7 +275,7 @@ pub fn init(client: Arc<Client>, cx: &mut AppContext) {
         async move {
             let embedding_provider = CloudEmbeddingProvider::new(client.clone());
             let semantic_index = SemanticIndex::new(
-                EMBEDDINGS_DIR.join("semantic-index-db.0.mdb"),
+                paths::embeddings_dir().join("semantic-index-db.0.mdb"),
                 Arc::new(embedding_provider),
                 &mut cx,
             )
@@ -260,10 +286,13 @@ pub fn init(client: Arc<Client>, cx: &mut AppContext) {
     .detach();
 
     prompt_library::init(cx);
-    completion_provider::init(client, cx);
+    completion_provider::init(client.clone(), cx);
     assistant_slash_command::init(cx);
     register_slash_commands(cx);
     assistant_panel::init(cx);
+    inline_assistant::init(fs.clone(), client.telemetry().clone(), cx);
+    terminal_inline_assistant::init(fs.clone(), client.telemetry().clone(), cx);
+    IndexedDocsRegistry::init_global(cx);
 
     CommandPaletteFilter::update_global(cx, |filter, _cx| {
         filter.hide_namespace(Assistant::NAMESPACE);
@@ -289,17 +318,31 @@ fn register_slash_commands(cx: &mut AppContext) {
     slash_command_registry.register_command(tabs_command::TabsSlashCommand, true);
     slash_command_registry.register_command(project_command::ProjectSlashCommand, true);
     slash_command_registry.register_command(search_command::SearchSlashCommand, true);
+    slash_command_registry.register_command(prompt_command::PromptSlashCommand, true);
+    slash_command_registry.register_command(default_command::DefaultSlashCommand, true);
+    slash_command_registry.register_command(term_command::TermSlashCommand, true);
+    slash_command_registry.register_command(now_command::NowSlashCommand, true);
+    slash_command_registry.register_command(diagnostics_command::DiagnosticsCommand, true);
     slash_command_registry.register_command(rustdoc_command::RustdocSlashCommand, false);
+    slash_command_registry.register_command(fetch_command::FetchSlashCommand, false);
+}
 
-    let store = PromptStore::global(cx);
-    cx.background_executor()
-        .spawn(async move {
-            let store = store.await?;
-            slash_command_registry
-                .register_command(prompt_command::PromptSlashCommand::new(store), true);
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
+pub fn humanize_token_count(count: usize) -> String {
+    match count {
+        0..=999 => count.to_string(),
+        1000..=9999 => {
+            let thousands = count / 1000;
+            let hundreds = (count % 1000 + 50) / 100;
+            if hundreds == 0 {
+                format!("{}k", thousands)
+            } else if hundreds == 10 {
+                format!("{}k", thousands + 1)
+            } else {
+                format!("{}.{}k", thousands, hundreds)
+            }
+        }
+        _ => format!("{}k", (count + 500) / 1000),
+    }
 }
 
 #[cfg(test)]
